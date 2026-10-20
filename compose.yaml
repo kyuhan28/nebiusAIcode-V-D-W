@@ -1,0 +1,35 @@
+# codeviz local services. Untrusted code never runs in these containers: the runner starts a
+# fresh, locked-down container from the sandbox image for every compile, run, trace, and test.
+#
+#   docker compose --profile image build    # builds the sandbox image and the runner
+#   docker compose up -d runner             # starts the runner on 127.0.0.1:8787
+#   docker compose logs -f runner
+#   docker compose down
+#
+# Put RUNNER_TOKEN in runner/.env (see runner/.env.example). The web app runs separately with
+# npm run dev and reaches the runner at http://127.0.0.1:8787.
+services:
+  sandbox:
+    build:
+      context: ./runner
+      dockerfile: sandbox.Dockerfile
+    image: codeviz-java-sandbox:21
+    profiles: ["image"]
+  runner:
+    build: ./runner
+    image: codeviz-runner:21
+    env_file: ./runner/.env
+    environment:
+      RUNNER_ISOLATION: docker
+      RUNNER_DOCKER_IMAGE: codeviz-java-sandbox:21
+      RUNNER_WORK_DIR: /tmp/codeviz-runs
+    volumes:
+      # The runner is trusted and starts sandboxes through the Docker daemon. Sandboxes never get
+      # this socket. Job directories use the same path on the host and in the runner, because
+      # the daemon resolves bind mounts on the host.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp/codeviz-runs:/tmp/codeviz-runs
+    ports:
+      - "127.0.0.1:8787:8787"
+    user: "0:0"
+    restart: unless-stopped

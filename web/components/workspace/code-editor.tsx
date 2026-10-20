@@ -1,100 +1,202 @@
 "use client";
 
-import Editor, { type BeforeMount, type OnMount } from "@monaco-editor/react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type CSSProperties } from "react";
+import { basicSetup } from "codemirror";
+import { EditorView, Decoration, keymap, type DecorationSet } from "@codemirror/view";
+import { Compartment, EditorSelection, EditorState, StateEffect, StateField } from "@codemirror/state";
+import { indentLess, indentMore } from "@codemirror/commands";
+import { HighlightStyle, indentUnit, syntaxHighlighting } from "@codemirror/language";
+import { java } from "@codemirror/lang-java";
+import { lintGutter, setDiagnostics, type Diagnostic as CmDiagnostic } from "@codemirror/lint";
+import { tags as t } from "@lezer/highlight";
 
-type EditorInstance = Parameters<OnMount>[0];
-type MonacoInstance = Parameters<OnMount>[1];
-type Decorations = ReturnType<EditorInstance["createDecorationsCollection"]>;
+export type EditorMarker = { line: number; column: number | null; severity: "error" | "warning" | "info"; message: string };
 
 type Props = {
+  path: string | null;
   value: string;
-  onChange: (value: string) => void;
+  onChange: (path: string, value: string) => void;
   activeLine: number | null;
+  markers: EditorMarker[];
+  fontSize: number;
   fontFamily: string;
+  /** The selected text, so the code writer can focus on it. */
+  onSelection?: (text: string) => void;
 };
 
-const defineTheme: BeforeMount = (monaco) => {
-  monaco.editor.defineTheme("codeviz", {
-    base: "vs-dark",
-    inherit: true,
-    rules: [
-      { token: "keyword", foreground: "b9a7ff" },
-      { token: "number", foreground: "f2c94c" },
-      { token: "string", foreground: "4fd8b0" },
-      { token: "comment", foreground: "6b6b80" },
-      { token: "type.identifier", foreground: "f08a4b" },
-    ],
-    colors: {
-      "editor.background": "#000000",
-      "editorGutter.background": "#000000",
-      "editorLineNumber.foreground": "#3f3f50",
-      "editorLineNumber.activeForeground": "#a1a1aa",
-      "editor.selectionBackground": "#7c5cff55",
-      "editorCursor.foreground": "#f4f4f5",
-      "scrollbarSlider.background": "#ffffff14",
-      "scrollbarSlider.hoverBackground": "#ffffff24",
-    },
-  });
-};
-
-export function CodeEditor({ value, onChange, activeLine, fontFamily }: Props) {
-  const editorRef = useRef<EditorInstance | null>(null);
-  const monacoRef = useRef<MonacoInstance | null>(null);
-  const decorations = useRef<Decorations | null>(null);
-  const lineRef = useRef(activeLine);
-
-  const highlight = (line: number | null) => {
-    const editor = editorRef.current;
-    const monaco = monacoRef.current;
-    if (!editor || !monaco || !decorations.current) return;
-    if (!line) {
-      decorations.current.clear();
-      return;
+/* The line the recorded execution is on. */
+const setActiveLine = StateEffect.define<number | null>();
+const activeLineMark = Decoration.line({ class: "cv-active-line" });
+const activeLineField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(deco, tr) {
+    let next = deco.map(tr.changes);
+    for (const e of tr.effects) {
+      if (e.is(setActiveLine)) {
+        next = e.value && e.value <= tr.state.doc.lines ? Decoration.set([activeLineMark.range(tr.state.doc.line(e.value).from)]) : Decoration.none;
+      }
     }
-    decorations.current.set([
-      {
-        range: new monaco.Range(line, 1, line, 1),
-        options: { isWholeLine: true, className: "cv-active-line", linesDecorationsClassName: "cv-active-gutter" },
-      },
-    ]);
-    editor.revealLineInCenterIfOutsideViewport(line);
-  };
+    return next;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
 
-  const onMount: OnMount = (editor, monaco) => {
-    editorRef.current = editor;
-    monacoRef.current = monaco;
-    decorations.current = editor.createDecorationsCollection();
-    highlight(lineRef.current);
-  };
+const sizing = new Compartment();
+const sizeTheme = (px: number) => EditorView.theme({ "&": { fontSize: `${px}px` }, ".cm-scroller": { lineHeight: `${Math.round(px * 1.6)}px` } });
+
+const theme = EditorView.theme(
+  {
+    "&": { height: "100%", backgroundColor: "#000000", color: "#e4e4e7" },
+    "&.cm-focused": { outline: "none" },
+    ".cm-scroller": { fontFamily: "var(--cv-mono), ui-monospace, monospace" },
+    ".cm-content": { padding: "14px 0", caretColor: "#f4f4f5" },
+    ".cm-gutters": { backgroundColor: "#000000", color: "#3f4556", border: "none", paddingLeft: "6px" },
+    ".cm-activeLineGutter": { backgroundColor: "transparent", color: "#9aa3b5" },
+    ".cm-activeLine": { backgroundColor: "rgba(255,255,255,0.025)" },
+    "&.cm-focused .cm-cursor": { borderLeftColor: "#6fe9ff" },
+    "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground": { backgroundColor: "rgba(47,107,255,0.32)" },
+    ".cm-matchingBracket": { backgroundColor: "rgba(111,233,255,0.14)", outline: "none" },
+    ".cm-foldPlaceholder": { backgroundColor: "#11141c", border: "1px solid #2a3040", color: "#9aa3b5" },
+    ".cm-panels": { backgroundColor: "#0a0c12", color: "#e4e4e7", borderTop: "1px solid rgba(255,255,255,0.08)" },
+    ".cm-panels input, .cm-panels button": { color: "#e4e4e7" },
+    ".cm-textfield": { backgroundColor: "#000", border: "1px solid #2a3040", borderRadius: "6px" },
+    ".cm-button": { backgroundImage: "none", backgroundColor: "#141824", border: "1px solid #2a3040", borderRadius: "6px" },
+    ".cm-searchMatch": { backgroundColor: "rgba(143,107,255,0.28)" },
+    ".cm-tooltip": { backgroundColor: "#0a0c12", border: "1px solid #2a3040", color: "#e4e4e7" },
+    ".cm-diagnostic-error": { borderLeft: "3px solid #ff5d73" },
+    ".cm-diagnostic-warning": { borderLeft: "3px solid #f2c94c" },
+    ".cm-lintRange-error": { backgroundImage: "none", textDecoration: "underline wavy #ff5d73 1px", textUnderlineOffset: "3px" },
+    ".cm-lintRange-warning": { backgroundImage: "none", textDecoration: "underline wavy #f2c94c 1px", textUnderlineOffset: "3px" },
+    ".cv-active-line": { backgroundColor: "rgba(111,233,255,0.09)", boxShadow: "inset 2px 0 0 #6fe9ff", animation: "cv-line-in 380ms ease-out" },
+  },
+  { dark: true },
+);
+
+const highlight = HighlightStyle.define([
+  { tag: [t.keyword, t.modifier, t.definitionKeyword, t.controlKeyword], color: "#a995ff" },
+  { tag: [t.number, t.bool, t.null], color: "#f2c94c" },
+  { tag: t.string, color: "#5fd9c0" },
+  { tag: [t.lineComment, t.blockComment], color: "#5c6478", fontStyle: "italic" },
+  { tag: [t.typeName, t.className, t.standard(t.typeName)], color: "#7fb4ff" },
+  { tag: t.function(t.variableName), color: "#9ee8ff" },
+  { tag: [t.operator, t.punctuation, t.bracket], color: "#8a93a6" },
+]);
+
+/*
+ * Tab indents instead of moving focus to the next control: with no selection it inserts four
+ * spaces at the cursor; with a selection it shifts the selected lines right. Shift+Tab outdents.
+ */
+const TAB = "    ";
+const tabKeys = keymap.of([
+  {
+    key: "Tab",
+    run: (view) => {
+      if (view.state.selection.ranges.some((r) => !r.empty)) return indentMore(view);
+      view.dispatch(
+        view.state.changeByRange((r) => ({ changes: { from: r.from, insert: TAB }, range: EditorSelection.cursor(r.from + TAB.length) })),
+        { scrollIntoView: true, userEvent: "input" },
+      );
+      return true;
+    },
+    shift: indentLess,
+  },
+]);
+
+export function CodeEditor({ path, value, onChange, activeLine, markers, fontSize, fontFamily, onSelection }: Props) {
+  const host = useRef<HTMLDivElement>(null);
+  const view = useRef<EditorView | null>(null);
+  const states = useRef(new Map<string, EditorState>());
+  const current = useRef<string | null>(null);
+  const latest = useRef({ onChange, fontSize, onSelection });
 
   useEffect(() => {
-    lineRef.current = activeLine;
-    highlight(activeLine);
-  }, [activeLine]);
+    latest.current = { onChange, fontSize, onSelection };
+  }, [onChange, fontSize, onSelection]);
 
-  return (
-    <Editor
-      height="100%"
-      defaultLanguage="java"
-      value={value}
-      onChange={(v) => onChange(v ?? "")}
-      theme="codeviz"
-      beforeMount={defineTheme}
-      onMount={onMount}
-      loading={<p className="p-6 text-sm text-zinc-500">Loading editor…</p>}
-      options={{
-        fontFamily,
-        fontSize: 14,
-        lineHeight: 22,
-        minimap: { enabled: false },
-        scrollBeyondLastLine: false,
-        padding: { top: 16, bottom: 16 },
-        renderLineHighlight: "none",
-        smoothScrolling: true,
-        automaticLayout: true,
-        tabSize: 4,
-      }}
-    />
-  );
+  const makeState = (p: string, doc: string) =>
+    EditorState.create({
+      doc,
+      extensions: [
+        tabKeys,
+        indentUnit.of(TAB),
+        basicSetup,
+        java(),
+        syntaxHighlighting(highlight),
+        theme,
+        sizing.of(sizeTheme(latest.current.fontSize)),
+        activeLineField,
+        lintGutter(),
+        EditorView.updateListener.of((u) => {
+          if (u.docChanged) latest.current.onChange(p, u.state.doc.toString());
+          if (u.selectionSet || u.docChanged) {
+            const sel = u.state.selection.main;
+            latest.current.onSelection?.(u.state.sliceDoc(sel.from, sel.to));
+          }
+        }),
+      ],
+    });
+
+  useEffect(() => {
+    if (!host.current) return;
+    const v = new EditorView({ parent: host.current, state: EditorState.create({ doc: "" }) });
+    view.current = v;
+    return () => {
+      v.destroy();
+      view.current = null;
+      current.current = null;
+    };
+  }, []);
+
+  /* Switch documents, keeping each file's own undo history. */
+  useEffect(() => {
+    const v = view.current;
+    if (!v) return;
+    if (current.current) states.current.set(current.current, v.state);
+    if (!path) {
+      current.current = null;
+      v.setState(EditorState.create({ doc: "", extensions: [theme, EditorState.readOnly.of(true)] }));
+      return;
+    }
+    const cached = states.current.get(path);
+    v.setState(cached && cached.doc.toString() === value ? cached : makeState(path, value));
+    v.dispatch({ effects: sizing.reconfigure(sizeTheme(latest.current.fontSize)) });
+    current.current = path;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path]);
+
+  /* Outside changes to the text (imports, reverts) replace the document. */
+  useEffect(() => {
+    const v = view.current;
+    if (!v || !path || current.current !== path) return;
+    const doc = v.state.doc.toString();
+    if (doc !== value) v.dispatch({ changes: { from: 0, to: doc.length, insert: value } });
+  }, [value, path]);
+
+  useEffect(() => {
+    view.current?.dispatch({ effects: sizing.reconfigure(sizeTheme(fontSize)) });
+  }, [fontSize]);
+
+  useEffect(() => {
+    const v = view.current;
+    if (!v || !path) return;
+    const effects: StateEffect<unknown>[] = [setActiveLine.of(activeLine)];
+    if (activeLine && activeLine <= v.state.doc.lines) effects.push(EditorView.scrollIntoView(v.state.doc.line(activeLine).from, { y: "center" }));
+    v.dispatch({ effects });
+  }, [activeLine, path]);
+
+  useEffect(() => {
+    const v = view.current;
+    if (!v || !path) return;
+    const doc = v.state.doc;
+    const diags: CmDiagnostic[] = markers
+      .filter((m) => m.line >= 1 && m.line <= doc.lines)
+      .map((m) => {
+        const line = doc.line(m.line);
+        const from = Math.min(line.from + Math.max((m.column ?? 1) - 1, 0), line.to);
+        return { from, to: Math.max(from, Math.min(line.to, from + 1)), severity: m.severity, message: m.message };
+      });
+    v.dispatch(setDiagnostics(v.state, diags));
+  }, [markers, path]);
+
+  return <div ref={host} className="h-full" style={{ "--cv-mono": fontFamily } as CSSProperties} />;
 }

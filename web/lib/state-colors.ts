@@ -3,4 +3,5 @@ export const STATE_COLORS = {
   stack: "#9d8cff",
   current: "#f2c94c",
   visited: "#4fd8b0",
+  best: "#7c5cff",
 } as const;
