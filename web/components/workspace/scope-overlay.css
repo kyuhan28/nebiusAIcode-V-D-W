@@ -1,0 +1,525 @@
+/* Global (not a CSS module): this project's Turbopack config treats every .css file as global, so classes carry the cvs- prefix instead. */
+/*
+ * The variables that live in the scene: static fields, then the call stack with one frame per
+ * active call. Colors follow the workspace: cyan marks where execution is, violet marks what just
+ * changed, steel blue is for types. Everything else stays graphite so the data keeps the focus.
+ */
+.cvs-root {
+  --panel: rgba(6, 9, 15, 0.8);
+  --line: rgba(255, 255, 255, 0.07);
+  --text: #e7e9ef;
+  --text-2: #9aa3b5;
+  --text-3: #6b7385;
+  --cyan: #6fe9ff;
+  --violet: #8f6bff;
+  --steel: #93a4c3;
+  position: absolute;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  pointer-events: none;
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.cvs-root[data-mode="docked"] {
+  top: 12px;
+  left: 12px;
+  bottom: 40px;
+  width: clamp(196px, 34%, 300px);
+}
+/* Folded: just the pill, as wide as it needs up to the scene's width. */
+.cvs-root[data-mode="docked"][data-open="false"] {
+  bottom: auto;
+  width: auto;
+  max-width: min(440px, calc(100% - 24px));
+}
+.cvs-root[data-mode="stage"] {
+  inset: 24px 16px 40px;
+  align-items: center;
+  overflow-y: auto;
+  pointer-events: auto;
+}
+.cvs-root[data-mode="stage"] > * {
+  width: min(440px, 100%);
+}
+
+.cvs-panel {
+  pointer-events: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+.cvs-stackPanel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.cvs-root[data-mode="docked"] .cvs-stackPanel {
+  flex: 0 1 auto;
+}
+
+.cvs-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 7px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.cvs-heading {
+  margin: 0;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  letter-spacing: 0.01em;
+}
+.cvs-headMeta {
+  white-space: nowrap;
+  font-family: var(--cv-mono);
+  font-size: 11px;
+  color: var(--text-3);
+}
+.cvs-headSpacer {
+  flex: 1;
+}
+.cvs-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 11.5px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.cvs-toggle:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+.cvs-toggle:focus-visible,
+.cvs-varButton:focus-visible,
+.cvs-more:focus-visible,
+.cvs-pill:focus-visible {
+  outline: 2px solid rgba(111, 233, 255, 0.6);
+  outline-offset: 1px;
+}
+
+/* Collapsed docked panel: one line naming where execution is. */
+.cvs-pill {
+  pointer-events: auto;
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+.cvs-pill > span:first-child {
+  white-space: nowrap;
+  color: var(--text-3);
+}
+.cvs-pill .cvs-sig {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------------- Frames ---------------- */
+
+.cvs-frames {
+  list-style: none;
+  margin: 0;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow-y: auto;
+  min-height: 0;
+  overscroll-behavior: contain;
+}
+
+.cvs-frame {
+  position: relative;
+  padding: 7px 9px 7px 22px;
+  border-radius: 9px;
+  opacity: 0.62;
+  transition: opacity 200ms ease, background-color 200ms ease;
+}
+/* The spine: the chain of callers, drawn from each frame down to the one that called it. */
+.cvs-frame::before {
+  content: "";
+  position: absolute;
+  left: 9px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: linear-gradient(var(--line), rgba(255, 255, 255, 0.12));
+}
+.cvs-frame:first-child::before {
+  top: 14px;
+}
+.cvs-frame:last-child::before {
+  bottom: calc(100% - 14px);
+}
+.cvs-frame::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 11px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #2a3242;
+  box-shadow: 0 0 0 2px rgba(6, 9, 15, 0.9);
+}
+.cvs-frame[data-active="true"] {
+  opacity: 1;
+  background: rgba(111, 233, 255, 0.055);
+  box-shadow: inset 0 0 0 1px rgba(111, 233, 255, 0.16);
+}
+.cvs-frame[data-active="true"]::after {
+  background: var(--cyan);
+  box-shadow: 0 0 0 2px rgba(6, 9, 15, 0.9), 0 0 10px rgba(111, 233, 255, 0.55);
+}
+.cvs-frame[data-new="true"] {
+  animation: cvs-frameIn 280ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+.cvs-frame[data-leaving="true"] {
+  animation: cvs-frameOut 320ms ease forwards;
+  pointer-events: none;
+}
+
+.cvs-frameHead {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.cvs-sig {
+  font-family: var(--cv-mono);
+  font-size: 12.5px;
+  color: var(--text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cvs-sigName {
+  font-weight: 600;
+}
+.cvs-sigArgs {
+  color: var(--text-2);
+}
+.cvs-sigChanged {
+  color: #c9b8ff;
+}
+.cvs-frameMeta {
+  flex-shrink: 0;
+  font-family: var(--cv-mono);
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+.cvs-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  margin-top: 1px;
+}
+.cvs-tag {
+  font-size: 10.5px;
+  color: var(--text-3);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 0 5px;
+}
+.cvs-tag[data-tone="call"] {
+  color: #9ee8ff;
+  border-color: rgba(111, 233, 255, 0.25);
+}
+/* A suspended frame's variables on one quiet line; click to open them. */
+.cvs-summary {
+  display: block;
+  width: 100%;
+  margin-top: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--cv-mono);
+  font-size: 11.5px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cvs-summary:hover {
+  color: var(--text-2);
+}
+.cvs-inlineLink {
+  margin-top: 3px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.cvs-inlineLink:hover {
+  color: var(--text);
+}
+.cvs-summary:focus-visible,
+.cvs-inlineLink:focus-visible {
+  outline: 2px solid rgba(111, 233, 255, 0.6);
+  outline-offset: 1px;
+}
+
+/* A value returned into this frame by the call it made, arriving from the frame above. */
+.cvs-received,
+.cvs-returning {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 4px 8px;
+  border-radius: 7px;
+  font-size: 11.5px;
+  color: var(--text-2);
+  font-family: var(--cv-mono);
+}
+.cvs-received {
+  background: rgba(111, 233, 255, 0.07);
+  animation: cvs-arrive 420ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+.cvs-returning {
+  border: 1px dashed rgba(111, 233, 255, 0.35);
+  animation: cvs-depart 360ms ease;
+}
+.cvs-flowValue {
+  color: var(--cyan);
+  font-weight: 600;
+}
+.cvs-flowFrom {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.cvs-more {
+  margin: 2px 0 2px 22px;
+  align-self: flex-start;
+  border: 1px dashed var(--line);
+  background: transparent;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 11.5px;
+  padding: 3px 9px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.cvs-more:hover {
+  color: var(--text);
+}
+.cvs-hidden {
+  margin: 4px 8px 2px 22px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+/* ---------------- Variables ---------------- */
+
+.cvs-vars {
+  list-style: none;
+  margin: 5px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.cvs-varButton {
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  column-gap: 6px;
+  width: 100%;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+.cvs-varButton[aria-expanded] {
+  cursor: pointer;
+}
+.cvs-varButton[aria-expanded]:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.cvs-varButton[data-changed="value"] {
+  background: rgba(143, 107, 255, 0.16);
+}
+.cvs-varButton[data-changed="contents"] {
+  background: rgba(143, 107, 255, 0.08);
+}
+.cvs-name {
+  font-family: var(--cv-mono);
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.cvs-eq {
+  font-family: var(--cv-mono);
+  color: var(--text-3);
+}
+.cvs-value {
+  font-family: var(--cv-mono);
+  color: var(--text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cvs-varButton[data-changed] .cvs-value {
+  animation: cvs-valueIn 520ms ease;
+}
+.cvs-varButton[data-fresh="true"] {
+  animation: cvs-fresh 520ms ease;
+}
+.cvs-type {
+  font-family: var(--cv-mono);
+  font-size: 11px;
+  color: var(--steel);
+  opacity: 0.8;
+  white-space: nowrap;
+  max-width: 9.5em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cvs-unknown {
+  text-decoration: underline dotted rgba(255, 255, 255, 0.35);
+  text-underline-offset: 3px;
+}
+.cvs-drawn {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-left: 5px;
+  border-radius: 50%;
+  background: var(--cyan);
+  opacity: 0.7;
+  vertical-align: middle;
+}
+
+/* Expanded value: indices, fields, or entries, one level at a time. */
+.cvs-detail {
+  margin: 2px 0 6px 10px;
+  padding: 6px 8px;
+  border-left: 1px solid var(--line);
+  font-family: var(--cv-mono);
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+.cvs-detailMeta {
+  color: var(--text-3);
+  font-size: 11px;
+  margin-bottom: 4px;
+  font-family: inherit;
+}
+.cvs-tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.cvs-tree .cvs-tree {
+  padding-left: 12px;
+  border-left: 1px solid var(--line);
+  margin-left: 3px;
+}
+.cvs-tree summary {
+  cursor: pointer;
+  list-style: none;
+}
+.cvs-tree summary::-webkit-details-marker {
+  display: none;
+}
+.cvs-tree summary::before {
+  content: "▸";
+  display: inline-block;
+  width: 12px;
+  color: var(--text-3);
+}
+.cvs-tree details[open] > summary::before {
+  content: "▾";
+}
+.cvs-leaf {
+  padding-left: 12px;
+}
+.cvs-key {
+  color: var(--text-3);
+}
+.cvs-note {
+  color: #c2a35a;
+  font-size: 11px;
+  font-family: inherit;
+}
+
+/* ---------------- Static fields ---------------- */
+
+.cvs-owner {
+  padding: 6px 12px 0;
+  font-family: var(--cv-mono);
+  font-size: 11px;
+  color: var(--text-3);
+}
+.cvs-staticVars {
+  padding: 2px 6px 8px;
+}
+
+@keyframes cvs-frameIn {
+  from { opacity: 0; transform: translateY(-10px); }
+}
+@keyframes cvs-frameOut {
+  to { opacity: 0; transform: translateY(-8px); }
+}
+@keyframes cvs-arrive {
+  from { opacity: 0; transform: translateY(-14px); }
+}
+@keyframes cvs-depart {
+  from { opacity: 0; transform: translateY(-4px); }
+}
+@keyframes cvs-valueIn {
+  from { color: #d4c8ff; text-shadow: 0 0 10px rgba(143, 107, 255, 0.8); }
+}
+@keyframes cvs-fresh {
+  from { opacity: 0; transform: translateX(-4px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cvs-frame,
+  .cvs-received,
+  .cvs-returning,
+  .cvs-varButton,
+  .cvs-value {
+    animation: none !important;
+    transition: none !important;
+  }
+}

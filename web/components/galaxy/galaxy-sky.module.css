@@ -1,0 +1,100 @@
+/*
+ * The galaxy behind the app. Everything here is fixed, behind all content, and never takes
+ * pointer events. Motion is opacity and transform only, so the browser animates it on the GPU
+ * without repainting, and it all stops for prefers-reduced-motion.
+ */
+.sky {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+  background: #04050d;
+}
+/* Shown first, and kept when WebGL is unavailable: the same sky in gradients. */
+.fallback {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 14% 7% at 56% 57%, rgba(255, 196, 150, 0.32), transparent 72%),
+    radial-gradient(ellipse 34% 13% at 58% 56%, rgba(200, 120, 130, 0.2), transparent 75%),
+    radial-gradient(ellipse 75% 20% at 50% 58%, rgba(120, 125, 200, 0.14), transparent 78%),
+    radial-gradient(ellipse 30% 14% at 88% 82%, rgba(170, 100, 120, 0.12), transparent 75%),
+    linear-gradient(180deg, #02030a 0%, #060818 42%, #0d0b20 72%, #080612 92%, #030308 100%);
+  transition: opacity 1.4s ease;
+}
+.sky[data-ready="true"][data-webgl="true"] .fallback {
+  opacity: 0;
+}
+.layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  transition: opacity 1.4s ease;
+}
+.sky[data-ready="true"] .layer {
+  opacity: 1;
+}
+/* Groups of brighter stars that brighten and fade out of step: a slow twinkle. */
+.twinkle {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  will-change: opacity;
+  /* Longhands, so the CSS Modules compiler can rename the keyframes even with variables here. */
+  animation-name: twinkle;
+  animation-duration: var(--period, 11s);
+  animation-delay: var(--delay, 0s);
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+}
+@keyframes twinkle {
+  0%, 100% { opacity: 0; }
+  50% { opacity: 0.55; }
+}
+/* The galactic core breathes very slightly. */
+.glow {
+  position: absolute;
+  left: 56%;
+  top: 57%;
+  width: 46vmax;
+  height: 18vmax;
+  transform: translate(-50%, -50%) rotate(-9deg);
+  background: radial-gradient(ellipse at center, rgba(255, 190, 150, 0.16), rgba(210, 120, 140, 0.08) 40%, transparent 72%);
+  opacity: 0.5;
+  will-change: opacity;
+  animation: breathe 26s ease-in-out infinite;
+}
+@keyframes breathe {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.85; }
+}
+/* Distant haze drifting across the band, almost too slowly to see. */
+.haze {
+  position: absolute;
+  inset: -20%;
+  background:
+    radial-gradient(ellipse 30% 10% at 30% 52%, rgba(140, 130, 210, 0.06), transparent 70%),
+    radial-gradient(ellipse 26% 9% at 74% 47%, rgba(200, 140, 190, 0.05), transparent 70%),
+    radial-gradient(ellipse 40% 14% at 55% 60%, rgba(120, 110, 190, 0.05), transparent 72%);
+  will-change: transform;
+  animation: drift 240s ease-in-out infinite alternate;
+}
+@keyframes drift {
+  from { transform: translate3d(-2.5%, 0.6%, 0); }
+  to { transform: translate3d(2.5%, -0.6%, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .twinkle,
+  .glow,
+  .haze {
+    animation: none;
+  }
+  .twinkle {
+    opacity: 0.25;
+  }
+}

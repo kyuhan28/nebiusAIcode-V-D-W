@@ -221,6 +221,10 @@ export function createEnvironment(options: { waterY: number; reducedMotion: bool
 
   return {
     group,
+    /** The sky dome, so a scene can hide it and show something else behind the landscape. */
+    sky,
+    /** The rippling water surface, so a scene can leave the floor as a plain grid. */
+    water,
     /** Fog color for objects in the scene, so distant structures fade into the night. */
     fogColor: new THREE.Color("#030719"),
     update(time: number, camera: THREE.PerspectiveCamera, pixelRatio: number) {

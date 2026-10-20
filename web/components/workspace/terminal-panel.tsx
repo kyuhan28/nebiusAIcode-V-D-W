@@ -46,7 +46,7 @@ export function TerminalPanel({ tab, setTab, phase, result, message, stdout, dia
     { id: "input", label: stdin ? "Input •" : "Input" },
   ];
   return (
-    <section aria-label="Terminal" className="flex h-full min-h-0 flex-col bg-black">
+    <section aria-label="Terminal" className="cv-glass-panel flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center gap-1 border-b border-white/10 px-2">
         {tabs.map((t) => (
           <button

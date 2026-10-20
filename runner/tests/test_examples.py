@@ -136,5 +136,25 @@ for f in files:
     check(f"{f.stem}: traces to completion ({t.get('stepCount')} steps)", j["status"] == "completed" and not t.get("truncated"), (j["status"], t.get("stopReason"), j["result"].get("error")))
     (HERE / "fixtures").mkdir(exist_ok=True)
     json.dump({"files": src, "result": j["result"]}, open(HERE / "fixtures" / f"ex_{f.stem}.json", "w"))
+
+# The workspace adds each example in its own folder and package (examples/<slug>/, package
+# examples.<slug>), so several examples and the user's own files compile together. Each one must
+# behave exactly as it does on its own.
+import re as _re
+section("examples run the same from their own package")
+together = {}
+for f in sorted(EXAMPLES.glob("*.java")):
+    if f.stem not in EXPECTED: continue
+    slug = _re.sub(r"Example$", "", f.stem).lower()
+    path = f"examples/{slug}/{f.name}"
+    together[path] = f"package examples.{slug};\n\n" + f.read_text()
+    s, j = execute({path: together[path]}, stdin=STDIN.get(f.stem, ""))
+    out = j["result"].get("stdout", "").strip().split("\n")
+    check(f"{f.stem}: same output from package examples.{slug}", j["status"] == "completed" and out == EXPECTED[f.stem], (j["status"], out[:3], j["result"].get("error")))
+inherit = EXAMPLES / "inheritance"
+together.update({f"examples/inheritance/{p.relative_to(inherit)}": p.read_text() for p in inherit.rglob("*.java")})
+s, j = execute(together, mode="compile")
+check(f"all {len(together)} example files compile together as one project", j["status"] == "completed", [d["message"] for d in j["result"].get("diagnostics", []) if d["severity"] == "error"][:3])
+
 print(f"\n{len(passed)} passed, {len(failed)} failed")
 sys.exit(1 if failed else 0)

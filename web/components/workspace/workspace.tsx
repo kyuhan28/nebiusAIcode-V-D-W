@@ -9,7 +9,17 @@ import { TerminalPanel, PHASE_LABEL, phaseTone, type Phase } from "./terminal-pa
 import { TraceVisualizer } from "./trace-visualizer";
 import { StructureVisualizer } from "./structure-visualizer";
 import { ScopeOverlay } from "./scope-overlay";
-import { GridSpace } from "./grid-space";
+import { InheritanceView } from "./inheritance-view";
+import { DpView } from "./dp-view";
+import { buildDp } from "@/lib/trace/dp";
+import { describeIssue } from "@/lib/native/memory-issues";
+import { normalizeTrace } from "@/lib/trace/scope";
+import { firstCalls, type ClassModel } from "@/lib/trace/inheritance";
+import { EXAMPLES } from "@/lib/examples/catalog";
+import { exampleFiles, exampleSlug, nextCopy, type ExampleFiles } from "@/lib/examples/load";
+import { planExample, withExample } from "@/lib/workspace/examples";
+import { SpaceScrim } from "./space-scrim";
+import { PanelBoundary } from "./panel-boundary";
 import { LibraryPanel } from "./library-panel";
 import { IoAssistant, type IoRun } from "./io-assistant";
 import { NemotronAssistant, type AssistContext, type AssistMode } from "./nemotron-assistant";
@@ -19,16 +29,15 @@ import { replayInput, type InputReplay } from "@/lib/trace/input";
 import { BackIcon, NextIcon, PauseIcon, PlayIcon, PrevIcon } from "./icons";
 import { interpret, type Interpretation } from "@/lib/trace/interpret";
 import {
-  STORAGE_KEY, addFile, closeTab, defaultProject, deleteFile, deserialize, isDirty, markSaved, newClassSource,
-  openFile, packageOf, renameFile, serialize, setContent, validatePath, type Project,
+  MAX_FILES, STORAGE_KEY, addFile, addFiles, closeTab, createFolder, defaultProject, deleteFile, deleteFolder, deserialize, filesIn,
+  isDirty, markSaved, newClassSource, openFile, packageOf, planAdd, renameFile, renameFolder, serialize, setContent, showInCurrentTab, validateFolder,
+  validatePath, type Project,
 } from "@/lib/workspace/project";
 import {
   RunnerError, cancelExecution, getRuntime, startExecution, waitForExecution, type Diagnostic, type ExecResult, type Runtime,
 } from "@/lib/workspace/runner-client";
 
 type Layout = "code" | "split" | "visualize";
-/* Each example is its own saved project, so switching never loses work. */
-type Context = { kind: "project" } | { kind: "example"; id: string };
 
 /** The class to run for a file: its package (from the source) plus its file name. */
 function classFor(path: string, content: string) {
@@ -36,19 +45,11 @@ function classFor(path: string, content: string) {
   const pkg = /^\s*package\s+([\w.]+)\s*;/m.exec(content)?.[1];
   return pkg ? `${pkg}.${base}` : base;
 }
-const keyFor = (c: Context) => (c.kind === "project" ? STORAGE_KEY : `codeviz.${c.kind}.${c.id}.v1`);
-
-async function initialProject(c: Context, fontSize: number): Promise<Project> {
-  if (c.kind === "example") {
-    const ex = exampleById(c.id)!;
-    const res = await fetch(`/examples/${ex.file}`, { cache: "no-store" });
-    if (!res.ok) throw new Error(`Could not load ${ex.file}.`);
-    const content = await res.text();
-    return { files: [{ path: ex.file, content, saved: content }], open: [ex.file], active: ex.file, mainClass: null, stdin: ex.stdin ?? "", fontSize };
-  }
-  return markSaved(defaultProject());
-}
-type Confirm = { title: string; body: string; action: string; danger?: boolean; onConfirm: () => void };
+/** Earlier versions kept each example as its own saved project under this key. */
+const legacyExampleKey = (id: string) => `codeviz.example.${id}.v1`;
+/** A dialog with one main action, and optionally a second, gentler one. */
+type Confirm = { title: string; body: string; action: string; danger?: boolean; onConfirm: () => void; alt?: { label: string; onClick: () => void } };
+const filesKey = (p: Project) => p.files.map((f) => `${f.path}\u0000${f.content}`).join("\u0001");
 const SPEEDS = [0.5, 1, 2, 4];
 const BUSY: Phase[] = ["preparing", "queued", "compiling", "running"];
 
@@ -66,6 +67,15 @@ function entryPoints(project: Project) {
 const btn = "inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-[13px] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6fe9ff]/60 disabled:opacity-35";
 const iconBtn = "inline-flex h-8 w-8 items-center justify-center rounded-full text-zinc-300 transition hover:bg-white/10 hover:text-white";
 
+/** Reads browser storage; null when it is blocked (some privacy modes throw on any access). */
+function readStorage(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
 export function Workspace({ monoFont }: { monoFont: string }) {
   const [project, setProject] = useState<Project>(defaultProject);
   const [hydrated, setHydrated] = useState(false);
@@ -82,15 +92,22 @@ export function Workspace({ monoFont }: { monoFont: string }) {
   const [speed, setSpeed] = useState(1);
   const [layout, setLayout] = useState<Layout>("split");
   const [explorer, setExplorer] = useState(true);
+  /* On narrow screens the explorer opens over the editor instead of beside it, closed by default. */
+  const [mobileFiles, setMobileFiles] = useState(false);
+  const toggleFiles = useCallback(() => {
+    if (window.matchMedia("(min-width: 768px)").matches) setExplorer((x) => !x);
+    else setMobileFiles((x) => !x);
+  }, []);
   const [terminalHeight, setTerminalHeight] = useState(220);
   const [rightWidth, setRightWidth] = useState(0.42);
   const [tab, setTab] = useState<"output" | "problems" | "input">("output");
   const [importing, setImporting] = useState(false);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [resetKey, setResetKey] = useState(0);
-  const [context, setContext] = useState<Context>({ kind: "project" });
-  const [sideTab, setSideTab] = useState<"files" | "examples">("files");
-  const [rightTab, setRightTab] = useState<"visualize" | "io">("visualize");
+  /* The examples library sits under the file explorer in one sidebar, so added files show right above it. */
+  const [examplesOpen, setExamplesOpen] = useState(true);
+  const examplesRef = useRef<HTMLElement>(null);
+  const [rightTab, setRightTab] = useState<"visualize" | "io" | "classes" | "dp">("visualize");
   /* Expected Output & Given Inputs: kept here so the code writer can use the same run. */
   const [ioFile, setIoFile] = useState("");
   const [ioInput, setIoInput] = useState("");
@@ -100,14 +117,16 @@ export function Workspace({ monoFont }: { monoFont: string }) {
   const [ioRunning, setIoRunning] = useState(false);
   const [assistRequest, setAssistRequest] = useState<{ mode: AssistMode; nonce: number } | null>(null);
   const selection = useRef("");
-  const buffers = useRef(new Map<string, Project>());
-  const contextRef = useRef<Context>(context);
-  const job = useRef<{ id: string | null; abort: AbortController } | null>(null);
+  const projectRef = useRef(project);
+  projectRef.current = project;
+  /* javac's class model from the latest clean compile, and the files it was built from. */
+  const [classModel, setClassModel] = useState<{ classes: ClassModel[] | null; failed: boolean; key: string }>({ classes: null, failed: false, key: "" });
+  const [reveal, setReveal] = useState<{ path: string; line: number; nonce: number } | null>(null);  const job = useRef<{ id: string | null; abort: AbortController } | null>(null);
   const mainRef = useRef<HTMLDivElement>(null);
 
   /* Load the saved project and ask the runner what it can do. */
   useEffect(() => {
-    const saved = deserialize(localStorage.getItem(STORAGE_KEY));
+    const saved = deserialize(readStorage(STORAGE_KEY));
     if (saved) setProject(saved);
     setHydrated(true);
   }, []);
@@ -142,60 +161,110 @@ export function Workspace({ monoFont }: { monoFont: string }) {
     };
   }, []);
 
-  /* Saving writes the files; settings such as input and font size are kept without a save. */
+  /*
+   * Writes the project to browser storage. When storage is full or blocked, the workspace keeps
+   * working and says so once, instead of failing in the middle of an update.
+   */
+  const storageWarned = useRef(false);
+  const store = useCallback((text: string): boolean => {
+    try {
+      localStorage.setItem(STORAGE_KEY, text);
+      storageWarned.current = false;
+      return true;
+    } catch {
+      if (!storageWarned.current) {
+        storageWarned.current = true;
+        queueMicrotask(() => setMessage("Browser storage is full or unavailable, so changes are not being saved and would be lost on reload. Delete large files (big data files especially) to make room."));
+      }
+      return false;
+    }
+  }, []);
+  /* Saving writes the files; settings such as input and font size are kept without a save. A file is
+     only marked saved when the write actually happened. */
   const save = useCallback((p: Project) => {
     const next = markSaved(p);
-    localStorage.setItem(keyFor(contextRef.current), serialize(next));
-    return next;
-  }, []);
+    return store(serialize(next)) ? next : p;
+  }, [store]);
+  /* Structural changes (adding, moving, deleting) are stored right away; unsaved edits stay unsaved. */
+  const persist = useCallback((p: Project) => {
+    store(serialize(p));
+    return p;
+  }, [store]);
   useEffect(() => {
     if (!hydrated) return;
-    const key = keyFor(context);
-    const stored = deserialize(localStorage.getItem(key));
+    const stored = deserialize(readStorage(STORAGE_KEY));
     if (!stored) return;
-    localStorage.setItem(key, serialize({ ...stored, mainClass: project.mainClass, stdin: project.stdin, fontSize: project.fontSize }));
-  }, [project.mainClass, project.stdin, project.fontSize, hydrated, context]);
+    store(serialize({ ...stored, mainClass: project.mainClass, stdin: project.stdin, fontSize: project.fontSize }));
+  }, [project.mainClass, project.stdin, project.fontSize, hydrated, store]);
 
-  /* Switch between your project, an example, or a problem, keeping unsaved edits in memory. */
-  const openContext = useCallback(
-    async (next: Context) => {
-      if (job.current) return;
-      buffers.current.set(keyFor(contextRef.current), project);
-      const key = keyFor(next);
-      let p = buffers.current.get(key) ?? deserialize(localStorage.getItem(key));
-      try {
-        if (!p) p = await initialProject(next, project.fontSize);
-      } catch (e) {
-        setMessage((e as Error).message);
+  /*
+   * Examples join the workspace: each goes into its own folder and package, next to everything
+   * already there. Loading one again opens it; if it was edited, the edits stay unless asked.
+   */
+  const addExample = useCallback(async (id: string) => {
+    const ex = exampleById(id);
+    /* Adding never replaces anything, so it is fine while a program runs: that run has its own copy of the files. */
+    if (!ex) return;
+    const open = (entry: string, note: string) => {
+      setProject((p) => (p.files.some((f) => f.path === entry) ? showInCurrentTab(p, entry) : p));
+      setMessage(note);
+    };
+    const apply = (built: ExampleFiles, replace: Set<string>, note: string) => {
+      const p = projectRef.current;
+      const result = withExample(p, built, ex.stdin, replace);
+      if (!result) {
+        const fresh = planExample(p, built).fresh;
+        setMessage(`Adding ${ex.title} needs ${fresh} more file${fresh === 1 ? "" : "s"}, but projects hold up to ${MAX_FILES}. Delete some files first; nothing was changed.`);
         return;
       }
-      contextRef.current = next;
-      setContext(next);
-      setProject(p);
-      setResult(null);
-      setInterp(null);
-      setInputReplay(null);
-      setMessage(null);
-      setIoRun(null);
-      setIoFile("");
-      setPhase("idle");
-    },
-    [project],
+      setProject(persist(result.project));
+      setMessage(note + (result.keptInput ? ` Your Input tab was kept; this example's sample input is ${JSON.stringify(ex.stdin)}.` : ""));
+    };
+    try {
+      let built = await exampleFiles(ex);
+      const plan = planExample(projectRef.current, built);
+      const folder = `examples/${built.slug}/`;
+      if (plan.kind === "same") return open(built.entry, `${ex.title} is already in ${folder}, unchanged. Opened it.`);
+      if (plan.kind === "new") {
+        /* Bring back edits made when this example was a separate project. */
+        const first = plan.fresh === built.files.length;
+        const legacy = first && !ex.files ? deserialize(readStorage(legacyExampleKey(id)))?.files.find((f) => f.path === ex.file) : undefined;
+        const mine = legacy ? await exampleFiles(ex, 1, { [ex.file]: legacy.content }) : null;
+        const restored = !!mine && mine.files[0].content !== built.files[0].content;
+        if (restored) built = mine!;
+        const what = first ? `Added ${ex.title} in ${folder}${restored ? " with the edits you made to it earlier" : ""}` : `Put back the ${plan.fresh} missing file${plan.fresh === 1 ? "" : "s"} of ${ex.title} in ${folder}`;
+        return apply(built, new Set(), `${what}. Your other files are unchanged.`);
+      }
+      const changed = plan.changed;
+      setConfirm({
+        title: `You have edited ${ex.title}`,
+        body: `${changed.length === 1 ? changed[0] : `${changed.length} files in ${folder}`} differ from the original. Your version stays as it is unless you choose to replace it.`,
+        action: "Add a fresh copy",
+        onConfirm: async () => {
+          const n = nextCopy(ex, projectRef.current.folders, projectRef.current.files.map((f) => f.path));
+          const copy = await exampleFiles(ex, n);
+          apply(copy, new Set(), `Added a fresh copy of ${ex.title} in examples/${copy.slug}/, package examples.${copy.slug}. Your edited version is unchanged.`);
+        },
+        alt: {
+          label: "Replace mine with the original",
+          onClick: () =>
+            setConfirm({
+              title: "Replace your edits?",
+              body: `${changed.join(", ")} will go back to the original example. Your changes to ${changed.length === 1 ? "it" : "them"} are lost. Nothing else changes.`,
+              action: "Replace",
+              danger: true,
+              onConfirm: () => apply(built, new Set(changed), `Restored the original ${ex.title}.`),
+            }),
+        },
+      });
+    } catch (e) {
+      setMessage((e as Error).message);
+    }
+  }, [persist]);
+  const addedExamples = useMemo(
+    () => new Set(EXAMPLES.filter((ex) => project.files.some((f) => f.path.startsWith(`examples/${exampleSlug(ex)}/`))).map((ex) => ex.id)),
+    [project.files],
   );
-  const resetToOriginal = () =>
-    setConfirm({
-      title: "Reset to the original example?",
-      body: "Your changes to this file are replaced. Your own project is not affected.",
-      action: "Reset",
-      danger: true,
-      onConfirm: async () => {
-        const fresh = await initialProject(context, project.fontSize);
-        buffers.current.delete(keyFor(context));
-        setProject(save(fresh));
-      },
-    });
-
-
 
   const dirty = project.files.some(isDirty);
   useEffect(() => {
@@ -209,18 +278,54 @@ export function Workspace({ monoFont }: { monoFont: string }) {
   const active = project.files.find((f) => f.path === project.active) ?? null;
   const busy = BUSY.includes(phase);
   const mains = useMemo(() => entryPoints(project), [project]);
+  /* Run and Visualize use the open file when it has a main method; the dropdown covers the rest. */
+  const activeMain = active && /static\s+(?:final\s+)?void\s+main\s*\(\s*(?:final\s+)?String/.test(active.content) ? classFor(active.path, active.content) : null;
+  /* An entry point picked in the menu counts only while its class still exists; files get deleted and renamed. */
+  const chosenMain = project.mainClass && mains.includes(project.mainClass) ? project.mainClass : null;
+  /* A .py file runs itself with the Python runner: every Python file is a program. */
+  const activePy = !!active && active.path.endsWith(".py");
+  /* C and C++: a source file runs its folder's program; a header builds it (the language comes from its neighbors). */
+  const nativeLang = (path: string | null | undefined): "c" | "cpp" | null => {
+    if (!path) return null;
+    if (/\.c$/.test(path)) return "c";
+    if (/\.(cpp|cc|cxx)$/.test(path)) return "cpp";
+    if (!/\.(h|hpp|hh|hxx)$/.test(path)) return null;
+    const dir = path.slice(0, path.lastIndexOf("/") + 1);
+    return /\.(hpp|hh|hxx)$/.test(path) || project.files.some((f) => f.path.startsWith(dir) && /\.(cpp|cc|cxx)$/.test(f.path)) ? "cpp" : "c";
+  };
+  const activeNative = nativeLang(active?.path);
+  const activeNativeSource = !!active && /\.(c|cpp|cc|cxx)$/.test(active.path);
+  /* What Run and Visualize use: the open file's main, else a still-valid pick from the menu. Never a deleted file. */
+  const runTarget = activePy || activeNativeSource ? active!.path : activeNative ? null : activeMain ?? chosenMain;
+  /* Forget a picked entry point as soon as its file is deleted, renamed, or loses its main method. */
+  useEffect(() => {
+    if (project.mainClass && !mains.includes(project.mainClass)) setProject((p) => ({ ...p, mainClass: null }));
+  }, [mains, project.mainClass]);
 
   /* ---------------- Execution ---------------- */
 
   const execute = useCallback(
     async (mode: "compile" | "run" | "trace", override?: { stdin?: string; mainClass?: string | null }): Promise<ExecResult | null> => {
       if (job.current) return null;
+      const explicit = !!override && override.mainClass !== undefined;
+      const target = explicit ? override!.mainClass! : runTarget;
+      /* The language follows the file being run (or, for Compile, the open file). */
+      const language: "java" | "python" | "c" | "cpp" = target ? (target.endsWith(".py") ? "python" : nativeLang(target) ?? "java") : activePy ? "python" : activeNative ?? "java";
+      /* Nothing in the open file to run (and no entry point picked): compile, so the code is still checked. */
+      const effective = mode !== "compile" && !target && !explicit ? "compile" : mode;
+      const name = active?.path.split("/").pop() ?? "This file";
+      const noMain = effective !== mode
+        ? `${name} has no main method, so the project was compiled instead of run. To run a program, open a file with public static void main(String[] args), or pick one in the entry-point menu.`
+        : null;
       const abort = new AbortController();
       job.current = { id: null, abort };
       setPhase("preparing");
       setMessage(null);
       setResult(null);
-      if (mode === "trace") {
+      if (effective === "trace") {
+        /* A new recording starts from the file the user is on. */
+        following.current = true;
+        autoOpened.current = active?.path ?? null;
         setInterp(null);
       setInputReplay(null);
         setPlaying(false);
@@ -228,9 +333,10 @@ export function Workspace({ monoFont }: { monoFont: string }) {
       try {
         const files = project.files.map((f) => ({ path: f.path, content: f.content }));
         const started = await startExecution({
-          mode,
+          mode: effective,
           files,
-          mainClass: override && override.mainClass !== undefined ? override.mainClass : project.mainClass,
+          mainClass: target,
+          language,
           stdin: override?.stdin ?? project.stdin,
         });
         job.current.id = started.id;
@@ -240,6 +346,7 @@ export function Workspace({ monoFont }: { monoFont: string }) {
         setResult(r);
         setPhase(r.status);
         if (r.error) setMessage(r.errorCode === "choose_main" ? "More than one class has a main method. Pick the entry point in the toolbar." : r.error);
+        else if (noMain && r.status === "completed") setMessage(noMain);
         setTab(r.status === "compile_failed" ? "problems" : "output");
         if (r.trace) {
           const sources = Object.fromEntries(files.map((f) => [f.path, f.content]));
@@ -269,7 +376,7 @@ export function Workspace({ monoFont }: { monoFont: string }) {
       }
       return null;
     },
-    [project, layout],
+    [project, layout, runTarget, active, activePy, activeNative],
   );
 
   /* Expected Output & Given Inputs: run the current (unsaved) code with the given input. */
@@ -322,6 +429,31 @@ export function Workspace({ monoFont }: { monoFont: string }) {
   /* ---------------- Playback ---------------- */
 
   const steps = interp?.steps ?? [];
+  /* The recorded steps with frame details carried forward, and when each implementation first ran. */
+  const rawSteps = useMemo(() => (result?.trace && interp ? normalizeTrace(result.trace) : null), [result, interp]);
+  const calls = useMemo(() => (rawSteps ? firstCalls(rawSteps) : null), [rawSteps]);
+  /* Subproblems, dependencies, and cache use, read from the same recording (null when not DP-shaped). */
+  const dpModel = useMemo(() => (rawSteps && interp ? buildDp(rawSteps, interp.steps) : null), [rawSteps, interp]);
+  /* The Pascal's triangle implementations in the project, next to the open one when it is one of them. */
+  const dpApproaches = useMemo(() => {
+    const LABELS: Record<string, string> = {
+      "PascalTriangle.java": "Bottom-up", "PascalTriangleMemoized.java": "Memoized", "PascalTriangleNaive.java": "No cache",
+      "pascal_triangle.py": "Bottom-up", "pascal_memo.py": "Memoized", "pascal_naive.py": "No cache",
+    };
+    const near = active && LABELS[active.path.split("/").pop()!] ? active.path.slice(0, active.path.lastIndexOf("/") + 1) : null;
+    const dir = near ?? project.files.find((f) => LABELS[f.path.split("/").pop()!])?.path.replace(/[^/]*$/, "") ?? null;
+    if (dir === null) return [];
+    return Object.keys(LABELS)
+      .map((name) => project.files.find((f) => f.path === dir + name))
+      .filter((f): f is NonNullable<typeof f> => !!f)
+      .map((f) => ({ path: f.path, label: LABELS[f.path.split("/").pop()!], active: f.path === active?.path }));
+  }, [project.files, active]);
+  /* Every clean compile brings javac's class model; a failed one marks the last model out of date. */
+  useEffect(() => {
+    if (!result || result.status === "queued") return;
+    if (result.hierarchy) setClassModel({ classes: result.hierarchy as ClassModel[], failed: false, key: filesKey(projectRef.current) });
+    else if (result.status === "compile_failed") setClassModel((m) => ({ ...m, failed: true }));
+  }, [result]);
   const current = steps[step] ?? null;
   const atEnd = step >= steps.length - 1;
   useEffect(() => {
@@ -331,9 +463,29 @@ export function Workspace({ monoFont }: { monoFont: string }) {
   }, [playing, step, speed, steps.length, atEnd]);
 
   /* Follow the execution into whichever file it is in. */
-  const currentFile = current?.file ?? null;
   useEffect(() => {
+    setMobileFiles(false);
+  }, [project.active]);
+  const currentFile = current?.file ?? null;
+  /*
+   * The editor follows the run until the user opens another file themselves; then a recording that
+   * finishes later, or playback reaching another file, no longer pulls them back. Using the playback
+   * controls means watching the run again, so following resumes.
+   */
+  const following = useRef(true);
+  const autoOpened = useRef<string | null>(null);
+  useEffect(() => {
+    if (project.active && autoOpened.current !== null && project.active !== autoOpened.current) following.current = false;
+  }, [project.active]);
+  useEffect(() => {
+    if (!currentFile || !following.current) return;
+    autoOpened.current = currentFile;
+    setProject((p) => (p.files.some((f) => f.path === currentFile) && p.active !== currentFile ? openFile(p, currentFile) : p));
+  }, [currentFile]);
+  const resumeFollow = useCallback(() => {
+    following.current = true;
     if (!currentFile) return;
+    autoOpened.current = currentFile;
     setProject((p) => (p.files.some((f) => f.path === currentFile) && p.active !== currentFile ? openFile(p, currentFile) : p));
   }, [currentFile]);
 
@@ -341,6 +493,10 @@ export function Workspace({ monoFont }: { monoFont: string }) {
 
   const diagnostics: Diagnostic[] = useMemo(() => {
     const list = [...(result?.diagnostics ?? [])];
+    /* What the sanitizers found in a C or C++ run, on the lines they name. */
+    for (const issue of result?.memoryIssues ?? []) {
+      list.push({ file: issue.file ?? null, line: issue.line ?? null, column: null, severity: issue.kind === "leak" ? "warning" : "error", message: describeIssue(issue) } as (typeof list)[number]);
+    }
     const ex = result?.exception;
     if (ex?.line) {
       const mapped = ex.sourcePath ? result?.trace?.sourceMap?.[ex.sourcePath] : undefined;
@@ -354,7 +510,8 @@ export function Workspace({ monoFont }: { monoFont: string }) {
     [diagnostics, project.active],
   );
   const execLine = current && current.file === project.active ? current.line : null;
-  const stdout = interp && current && result?.stdout !== undefined ? result.stdout.slice(0, current.out) : (result?.stdout ?? "");
+  /* Output follows playback only for the visualized run itself; a Run or Compile shows all of its output. */
+  const stdout = interp && current && result?.mode === "trace" && result.stdout !== undefined ? result.stdout.slice(0, current.out) : (result?.stdout ?? "");
 
   /* ---------------- File actions ---------------- */
 
@@ -362,15 +519,43 @@ export function Workspace({ monoFont }: { monoFont: string }) {
   const createFile = (path: string) => {
     const err = validatePath(path, project.files.map((f) => f.path));
     if (err) return err;
-    setProject((p) => addFile(p, path, newClassSource(path)));
+    if (project.files.length >= MAX_FILES) return `Projects hold up to ${MAX_FILES} files. Delete one first.`;
+    setProject((p) => persist(addFile(p, path, newClassSource(path))));
     return null;
   };
   const rename = (from: string, to: string) => {
     if (from === to) return null;
     const err = validatePath(to, project.files.map((f) => f.path), from);
     if (err) return err;
-    setProject((p) => renameFile(p, from, to));
+    setProject((p) => persist(renameFile(p, from, to)));
     return null;
+  };
+  const newFolder = (path: string) => {
+    const err = validateFolder(path, project);
+    if (err) return err;
+    setProject((p) => persist(createFolder(p, path)));
+    return null;
+  };
+  const moveFolder = (from: string, to: string) => {
+    if (from === to) return null;
+    if (to.startsWith(from + "/")) return "A folder cannot move inside itself.";
+    const err = validateFolder(to, project, from);
+    if (err) return err;
+    const clash = filesIn(project, from).find((f) => project.files.some((x) => x.path === to + f.path.slice(from.length)));
+    if (clash) return `${to + clash.path.slice(from.length)} already exists.`;
+    setProject((p) => persist(renameFolder(p, from, to)));
+    return null;
+  };
+  const removeFolder = (path: string) => {
+    const inside = filesIn(project, path);
+    if (!inside.length) return setProject((p) => persist(deleteFolder(p, path)));
+    setConfirm({
+      title: `Delete ${path} and its ${inside.length} file${inside.length === 1 ? "" : "s"}?`,
+      body: `${inside.slice(0, 4).map((f) => f.path).join(", ")}${inside.length > 4 ? ", …" : ""} will be removed, including any unsaved changes in them. Files outside ${path} are not affected.`,
+      action: "Delete folder",
+      danger: true,
+      onConfirm: () => setProject((p) => persist(deleteFolder(p, path))),
+    });
   };
   const remove = (path: string) =>
     setConfirm({
@@ -378,7 +563,7 @@ export function Workspace({ monoFont }: { monoFont: string }) {
       body: "This removes the file from your project, including any unsaved changes in it.",
       action: "Delete",
       danger: true,
-      onConfirm: () => setProject((p) => save(deleteFile(p, path))),
+      onConfirm: () => setProject((p) => persist(deleteFile(p, path))),
     });
   const close = (path: string) => {
     const f = project.files.find((x) => x.path === path);
@@ -391,15 +576,27 @@ export function Workspace({ monoFont }: { monoFont: string }) {
       });
     } else setProject((p) => closeTab(p, path));
   };
-  const importFiles = (files: { path: string; content: string }[]) => {
-    setProject((p) => {
-      let next = p;
-      for (const f of files) next = addFile(next, f.path, f.content);
-      return save(openFile(next, files[0].path));
-    });
+  /* Imported files join the project; a different file at the same path is replaced only when chosen. */
+  const importFiles = (files: { path: string; content: string }[], replace: Set<string>) => {
+    const p = projectRef.current;
+    const next = addFiles(p, files, { replace, saved: true });
+    if (!next) {
+      setMessage(`That import would take the project past ${MAX_FILES} files. Nothing was imported.`);
+      return;
+    }
+    const plan = planAdd(p, files);
+    const added = plan.filter((f) => f.status === "new").length;
+    const kept = plan.filter((f) => f.status === "conflict" && !replace.has(f.path)).length;
+    const first = plan.find((f) => f.status === "new" || replace.has(f.path))?.path ?? files[0].path;
+    setProject(persist(openFile(next, first)));
+    setMessage(`Imported ${added} new file${added === 1 ? "" : "s"}${replace.size ? `, replaced ${replace.size}` : ""}${kept ? `, kept your version of ${kept}` : ""}.`);
     setImporting(false);
   };
   const jump = (file: string) => setProject((p) => openFile(p, file));
+  const jumpTo = (file: string, line: number | null) => {
+    setProject((p) => (p.files.some((f) => f.path === file) ? openFile(p, file) : p));
+    if (line) setReveal({ path: file, line, nonce: Date.now() });
+  };
 
   /* ---------------- Shortcuts ---------------- */
 
@@ -446,6 +643,57 @@ export function Workspace({ monoFont }: { monoFont: string }) {
   const scopeMode: "docked" | "stage" | null = !interp ? null : sceneDrawn ? "docked" : inputReplay ? null : "stage";
   const rightPct = layout === "visualize" ? 0.66 : rightWidth;
 
+  /* Playback controls, shared by every view that follows the recorded run (Visualize, Inheritance, Dynamic programming). */
+  const playback = interp ? (
+                <div className="shrink-0 border-t border-white/10 px-4 py-3">
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => { resumeFollow(); setPlaying(false); setStep((s) => Math.max(0, s - 1)); }} className={iconBtn} aria-label="Previous step"><PrevIcon /></button>
+                    <button
+                      onClick={() => {
+                        resumeFollow();
+                        if (atEnd) {
+                          setStep(0);
+                          setPlaying(true);
+                        } else setPlaying((p) => !p);
+                      }}
+                      className={`${iconBtn} bg-white/10`}
+                      aria-label={playing && !atEnd ? "Pause" : "Play"}
+                    >
+                      {playing && !atEnd ? <PauseIcon /> : <PlayIcon />}
+                    </button>
+                    <button onClick={() => { resumeFollow(); setPlaying(false); setStep((s) => Math.min(steps.length - 1, s + 1)); }} className={iconBtn} aria-label="Next step"><NextIcon /></button>
+                    <input
+                      type="range"
+                      min={0}
+                      max={Math.max(steps.length - 1, 0)}
+                      value={step}
+                      onChange={(e) => { resumeFollow(); setPlaying(false); setStep(Number(e.target.value)); }}
+                      className="mx-2 h-1 min-w-0 flex-1 accent-[#6fe9ff]"
+                      aria-label="Recorded step"
+                    />
+                    <span className="w-24 text-right text-[12px] tabular-nums text-zinc-500">{step + 1} / {steps.length}</span>
+                    <button onClick={() => setSpeed((s) => SPEEDS[(SPEEDS.indexOf(s) + 1) % SPEEDS.length])} className="ml-1 w-11 rounded-full border border-white/15 py-0.5 text-[12px] tabular-nums text-zinc-400 hover:text-zinc-100">{speed}×</button>
+                  </div>
+                  {current && (
+                    <div className="mt-2 grid gap-1 text-[13px]">
+                      <p className="cv-glass-panel text-[15px] text-zinc-100" aria-live="polite">{current.note}</p>
+                      <p className="truncate text-zinc-500" style={{ fontFamily: monoFont }}>
+                        {current.frames.map((f) => `${f.method}():${f.line}`).join("  ‹  ")}
+                      </p>
+                      {!scopeMode && current.vars.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 pt-1" style={{ fontFamily: monoFont }}>
+                          {current.vars.map((v) => (
+                            <span key={v.name} className={`rounded-md px-2 py-0.5 text-[12px] transition ${v.changed ? "bg-[#8f6bff]/20 text-zinc-50" : "bg-white/5 text-zinc-300"}`}>
+                              <span className="text-zinc-500">{v.name} =</span> {v.value}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+  ) : null;
+
   return (
     <div className="flex h-svh flex-col bg-black text-zinc-100 antialiased">
       <style>{`
@@ -453,12 +701,12 @@ export function Workspace({ monoFont }: { monoFont: string }) {
         @keyframes cv-progress { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
       `}</style>
 
-      <header className="relative flex h-13 shrink-0 items-center gap-2 border-b border-white/10 px-3">
+      <header className="cv-glass-header relative flex h-13 shrink-0 items-center gap-2 border-b border-white/10 px-3">
         <Link href="/" className="flex items-center gap-1.5 rounded-full py-1.5 pl-2 pr-3 text-[15px] font-bold tracking-tight transition hover:bg-white/10">
           <BackIcon className="text-zinc-500" />
           codeviz
         </Link>
-        <button onClick={() => setExplorer((x) => !x)} className={`${btn} hidden text-zinc-400 hover:bg-white/10 hover:text-zinc-100 md:inline-flex`} aria-pressed={explorer}>
+        <button onClick={toggleFiles} className={`${btn} text-zinc-400 hover:bg-white/10 hover:text-zinc-100`} aria-pressed={explorer} aria-expanded={mobileFiles || undefined}>
           Files
         </button>
         <button onClick={() => setImporting(true)} className={`${btn} text-zinc-400 hover:bg-white/10 hover:text-zinc-100`}>
@@ -466,33 +714,33 @@ export function Workspace({ monoFont }: { monoFont: string }) {
         </button>
         <button onClick={openIo} className={`${btn} hidden text-zinc-400 hover:bg-white/10 hover:text-zinc-100 xl:inline-flex`}>Expected Output &amp; Given Inputs</button>
         <span className="mx-1 hidden h-5 w-px bg-white/10 md:block" aria-hidden="true" />
-        <span className="hidden max-w-56 truncate text-[13px] text-zinc-300 lg:inline">
-          {context.kind === "project" ? "My project" : exampleById(context.id)?.title}
-        </span>
-        {context.kind !== "project" && (
-          <>
-            <button onClick={resetToOriginal} className={`${btn} text-zinc-500 hover:bg-white/10 hover:text-zinc-200`}>Reset</button>
-            <button onClick={() => openContext({ kind: "project" })} className={`${btn} hidden text-zinc-500 hover:bg-white/10 hover:text-zinc-200 xl:inline-flex`}>Back to my project</button>
-          </>
-        )}
+        <span className="hidden max-w-56 truncate text-[13px] text-zinc-300 lg:inline">My project</span>
         <span className="mx-1 hidden h-5 w-px bg-white/10 md:block" aria-hidden="true" />
         <span
           className="hidden items-center gap-2 text-[12px] text-zinc-500 md:flex"
-          title={runtimeError ?? (sandbox === "unavailable" ? runtime?.docker?.problem ?? "Docker is not available." : sandbox === "partial" ? "This runner cannot isolate network access on its host." : sandbox === "docker" ? "Each run uses its own locked-down container." : "Programs run in isolated, resource-limited JVMs.")}
+          title={runtimeError ?? (sandbox === "unavailable" ? runtime?.docker?.problem ?? "Docker is not available." : sandbox === "partial" ? "This runner cannot isolate network access on its host." : sandbox === "docker" ? "Each run uses its own locked-down container." : "Programs run without network access and with time, memory, and output limits, but can reach the files on this machine. Use Docker mode for code you did not write.")}
         >
           <span className={`h-1.5 w-1.5 rounded-full ${!runtime || sandbox === "unavailable" ? "bg-[#ff5d73]" : sandbox === "partial" ? "bg-[#f2c94c]" : "bg-[#5fd9c0]"}`} />
           {!runtime
             ? "Runner offline"
             : sandbox === "unavailable"
               ? "Docker unavailable"
-              : `Java ${runtime.javaVersion.split("+")[0]}, ${sandbox === "docker" ? "Docker sandbox" : sandbox === "partial" ? "partial sandbox" : "sandboxed"}`}
+              : `${activePy ? (runtime.python?.available ? `Python ${runtime.python.version}` : "Python not available") : activeNative ? (activeNative === "cpp" ? "C++20 · g++" : "C17 · gcc") : `Java ${runtime.javaVersion.split("+")[0]}`}, ${sandbox === "docker" ? "Docker sandbox" : sandbox === "partial" ? "partial sandbox" : "process sandbox"}`}
         </span>
         <div className="flex-1" />
 
-        {mains.length > 1 && (
+        {mains.length > 1 && !activePy && !activeNative && (
           <select
-            value={project.mainClass ?? ""}
-            onChange={(e) => setProject((p) => ({ ...p, mainClass: e.target.value || null }))}
+            value={activeMain ?? chosenMain ?? ""}
+            /* Choosing an entry point opens its file, so the file on screen is the one that runs. */
+            onChange={(e) => {
+              const cls = e.target.value || null;
+              const file = cls ? project.files.find((f) => classFor(f.path, f.content) === cls) : undefined;
+              setProject((p) => {
+                const next = { ...p, mainClass: cls };
+                return file ? showInCurrentTab(next, file.path) : next;
+              });
+            }}
             className="h-8 max-w-44 rounded-full border border-white/15 bg-black px-3 text-[12px] text-zinc-200 outline-none focus:border-[#6fe9ff]/60"
             aria-label="Entry point"
           >
@@ -530,30 +778,35 @@ export function Workspace({ monoFont }: { monoFont: string }) {
       </header>
 
       <div ref={mainRef} className="flex min-h-0 flex-1">
-        {explorer && (
-          <aside className="hidden w-64 shrink-0 flex-col border-r border-white/10 md:flex">
-            <div className="flex shrink-0 gap-0.5 border-b border-white/10 px-2 pt-2" role="tablist" aria-label="Sidebar">
-              {(["files", "examples"] as const).map((t) => (
-                <button key={t} role="tab" aria-selected={sideTab === t} onClick={() => setSideTab(t)} className={`relative px-2.5 pb-2 pt-1 text-[12px] capitalize transition ${sideTab === t ? "text-zinc-100" : "text-zinc-500 hover:text-zinc-300"}`}>
-                  {t}
-                  {sideTab === t && <span className="absolute inset-x-2 bottom-0 h-px bg-[#6fe9ff]" />}
-                </button>
-              ))}
+        {mobileFiles && <button className="fixed inset-0 z-30 bg-black/60 md:hidden" aria-label="Close the file explorer" onClick={() => setMobileFiles(false)} />}
+        {(explorer || mobileFiles) && (
+          <aside
+            aria-label="File explorer"
+            className={`cv-glass-side ${mobileFiles ? "fixed inset-y-0 left-0 z-40 flex w-72 max-w-[85vw] shadow-2xl" : "hidden"} w-64 shrink-0 flex-col border-r border-white/10 md:static md:z-auto md:w-64 md:max-w-none md:shadow-none ${explorer ? "md:flex" : "md:hidden"}`}
+          >
+            <div className="min-h-0 flex-1">
+              <FileExplorer project={project} onOpen={(p) => setProject((x) => openFile(x, p))} onCreate={createFile} onRename={rename} onDelete={remove}
+                onCreateFolder={newFolder} onRenameFolder={moveFolder} onDeleteFolder={removeFolder}
+                onAddExamples={() => { setExamplesOpen(true); requestAnimationFrame(() => examplesRef.current?.scrollIntoView({ block: "nearest" })); }} />
             </div>
-            <div className="min-h-0 flex-1 overflow-auto">
-              {sideTab === "files" ? (
-                <FileExplorer project={project} onOpen={(p) => setProject((x) => openFile(x, p))} onCreate={createFile} onRename={rename} onDelete={remove} />
-              ) : (
-                <div className="pt-2">
-                  <LibraryPanel activeId={context.kind === "example" ? context.id : null} onOpenExample={(id) => openContext({ kind: "example", id })} />
+            {/* Clicking an example adds its files to the explorer above; this list stays put for the next one. */}
+            <section ref={examplesRef} aria-label="Examples" className={`flex shrink-0 flex-col border-t border-white/10 ${examplesOpen ? "h-[44%] min-h-44" : ""}`}>
+              <button onClick={() => setExamplesOpen((o) => !o)} aria-expanded={examplesOpen} className="flex shrink-0 items-center gap-1.5 px-3 py-2 text-left text-[11px] font-medium text-zinc-500 hover:text-zinc-300">
+                <span className={`inline-block text-[9px] transition-transform ${examplesOpen ? "rotate-90" : ""}`} aria-hidden="true">▸</span>
+                Examples
+                <span className="font-normal text-zinc-600">{addedExamples.size ? `${addedExamples.size} in project` : "click to add"}</span>
+              </button>
+              {examplesOpen && (
+                <div className="min-h-0 flex-1 overflow-auto">
+                  <LibraryPanel added={addedExamples} onOpenExample={addExample} />
                 </div>
               )}
-            </div>
+            </section>
           </aside>
         )}
 
         <div className={`flex min-w-0 flex-1 flex-col ${layout === "visualize" ? "max-lg:hidden" : ""}`}>
-          <div className="flex h-10 shrink-0 items-end gap-0.5 overflow-x-auto border-b border-white/10 px-2">
+          <div className="cv-glass-header flex h-10 shrink-0 items-end gap-0.5 overflow-x-auto border-b border-white/10 px-2">
             {project.open.map((path) => {
               const f = project.files.find((x) => x.path === path);
               if (!f) return null;
@@ -578,9 +831,10 @@ export function Workspace({ monoFont }: { monoFont: string }) {
           <div className="min-h-0 flex-1 overflow-hidden">
             {active ? (
               <CodeEditor path={active.path} value={active.content} onChange={onChange} activeLine={execLine} markers={markers} fontSize={project.fontSize} fontFamily={monoFont}
+                  reveal={reveal && reveal.path === active.path ? reveal : null}
                   onSelection={(t) => (selection.current = t)} />
             ) : (
-              <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-zinc-500">
+              <div className="cv-glass-editor flex h-full flex-col items-center justify-center gap-3 text-sm text-zinc-500">
                 <p>Open a file from the list, or start a new one.</p>
                 <button onClick={() => setImporting(true)} className="rounded-full border border-white/15 px-4 py-1.5 text-zinc-300 hover:border-white/30">Import Java files</button>
               </div>
@@ -618,15 +872,64 @@ export function Workspace({ monoFont }: { monoFont: string }) {
               className={`min-w-0 flex-col border-l border-white/10 ${layout === "visualize" ? "flex flex-1 lg:flex-none" : "hidden lg:flex"}`}
               style={{ width: `${rightPct * 100}%` }}
             >
-              <div className="flex shrink-0 gap-0.5 border-b border-white/10 px-3 pt-2" role="tablist" aria-label="Right panel">
-                {([["visualize", "Visualize"], ["io", "Expected Output & Given Inputs"]] as const).map(([t, label]) => (
+              <div className="cv-glass-header flex shrink-0 gap-0.5 border-b border-white/10 px-3 pt-2" role="tablist" aria-label="Right panel">
+                {([["visualize", "Visualize"], ["classes", "Inheritance"], ["dp", "Dynamic programming"], ["io", "Expected Output & Given Inputs"]] as const).map(([t, label]) => (
                   <button key={t} role="tab" aria-selected={rightTab === t} onClick={() => setRightTab(t)} className={`relative px-2.5 pb-2 pt-1 text-[12px] transition ${rightTab === t ? "text-zinc-100" : "text-zinc-500 hover:text-zinc-300"}`}>
                     {label}
                     {rightTab === t && <span className="absolute inset-x-2 bottom-0 h-px bg-[#6fe9ff]" />}
                   </button>
                 ))}
               </div>
-              {rightTab === "io" ? (
+              {rightTab === "dp" ? (
+                <>
+                <div className="relative min-h-0 flex-1">
+                  <PanelBoundary name="Dynamic programming view">
+                    <DpView
+                      model={dpModel}
+                      steps={rawSteps?.steps ?? null}
+                      stepIndex={step}
+                      onSeek={(s) => { setPlaying(false); setStep(s); }}
+                      onJump={jumpTo}
+                      rows={Math.max(1, Math.min(12, parseInt(project.stdin, 10) || dpModel?.rows || 6))}
+                      onRows={(n) => {
+                        const input = `${n}\n`;
+                        setProject((p) => ({ ...p, stdin: input }));
+                        void execute("trace", { stdin: input });
+                      }}
+                      approaches={dpApproaches}
+                      onApproach={(path) => {
+                        const f = project.files.find((x) => x.path === path);
+                        if (!f) return;
+                        setProject((p) => showInCurrentTab(p, path));
+                        void execute("trace", { mainClass: f.path.endsWith(".py") ? f.path : classFor(f.path, f.content) });
+                      }}
+                      busy={busy}
+                      fontFamily={monoFont}
+                    />
+                  </PanelBoundary>
+                </div>
+                {playback}
+                </>
+              ) : rightTab === "classes" ? (
+                <>
+                <div className="relative min-h-0 flex-1">
+                  <PanelBoundary name="Inheritance view">
+                  <InheritanceView
+                    classes={classModel.classes}
+                    status={classModel.classes ? "ready" : classModel.failed ? "compile_failed" : "none"}
+                    stale={!!classModel.classes && (classModel.failed || classModel.key !== filesKey(project))}
+                    step={rawSteps?.steps[step] ?? null}
+                    heap={current?.scope?.heap ?? null}
+                    stepIndex={step}
+                    calls={calls}
+                    onJump={jumpTo}
+                    fontFamily={monoFont}
+                  />
+                  </PanelBoundary>
+                </div>
+                {playback}
+                </>
+              ) : rightTab === "io" ? (
                 <div className="min-h-0 flex-1">
                   <IoAssistant
                     files={javaFiles}
@@ -650,6 +953,8 @@ export function Workspace({ monoFont }: { monoFont: string }) {
               ) : (
               <>
               <div className="relative min-h-0 flex-1 overflow-hidden">
+                <div className="cv-scene-scrim" aria-hidden="true" />
+                <PanelBoundary key={interp ? "run" : "idle"} name="visualizer">
                 {interp && interp.layers.length >= 2 ? (
                   <StructureVisualizer views={current?.layers ?? []} resetKey={resetKey} fontFamily={monoFont} className="absolute inset-0" />
                 ) : interp?.structure ? (
@@ -660,14 +965,14 @@ export function Workspace({ monoFont }: { monoFont: string }) {
                   <InputStream replay={inputReplay} step={step} onSeek={(s) => { setPlaying(false); setStep(s); }} fontFamily={monoFont} />
                 ) : interp ? (
                   <>
-                    <GridSpace />
+                    <SpaceScrim />
                     <p className="pointer-events-none absolute inset-x-0 bottom-3 z-10 px-6 text-center text-[12px] text-zinc-600">
                       This run builds no array, list, tree, graph, or map, so its calls and variables are the picture.
                     </p>
                   </>
                 ) : (
                   <div className="relative flex h-full flex-col items-center justify-center px-8 text-center">
-                    <GridSpace />
+                    <SpaceScrim />
                     <p className="relative text-lg font-semibold tracking-tight text-zinc-200">Watch your code run</p>
                     <p className="relative mt-2 max-w-sm text-sm leading-relaxed text-zinc-500">
                       Visualize records your program&apos;s real execution, line by line, and draws its variables, calls, and the arrays, lists, trees, graphs, and maps it builds. Open an example to try it.
@@ -678,6 +983,7 @@ export function Workspace({ monoFont }: { monoFont: string }) {
                   </div>
                 )}
                 {scopeMode && <ScopeOverlay scope={current?.scope ?? null} mode={scopeMode} step={step} fontFamily={monoFont} />}
+                </PanelBoundary>
                 {(interp?.array || interp?.structure || (interp?.layers.length ?? 0) >= 2) && (
                   <button onClick={() => setResetKey((k) => k + 1)} className="absolute right-3 top-3 rounded-full border border-white/15 px-3 py-1 text-[12px] text-zinc-400 hover:text-zinc-100">Reset view</button>
                 )}
@@ -689,54 +995,7 @@ export function Workspace({ monoFont }: { monoFont: string }) {
                 </div>
               )}
 
-              {interp && (
-                <div className="shrink-0 border-t border-white/10 px-4 py-3">
-                  <div className="flex items-center gap-1">
-                    <button onClick={() => { setPlaying(false); setStep((s) => Math.max(0, s - 1)); }} className={iconBtn} aria-label="Previous step"><PrevIcon /></button>
-                    <button
-                      onClick={() => {
-                        if (atEnd) {
-                          setStep(0);
-                          setPlaying(true);
-                        } else setPlaying((p) => !p);
-                      }}
-                      className={`${iconBtn} bg-white/10`}
-                      aria-label={playing && !atEnd ? "Pause" : "Play"}
-                    >
-                      {playing && !atEnd ? <PauseIcon /> : <PlayIcon />}
-                    </button>
-                    <button onClick={() => { setPlaying(false); setStep((s) => Math.min(steps.length - 1, s + 1)); }} className={iconBtn} aria-label="Next step"><NextIcon /></button>
-                    <input
-                      type="range"
-                      min={0}
-                      max={Math.max(steps.length - 1, 0)}
-                      value={step}
-                      onChange={(e) => { setPlaying(false); setStep(Number(e.target.value)); }}
-                      className="mx-2 h-1 min-w-0 flex-1 accent-[#6fe9ff]"
-                      aria-label="Recorded step"
-                    />
-                    <span className="w-24 text-right text-[12px] tabular-nums text-zinc-500">{step + 1} / {steps.length}</span>
-                    <button onClick={() => setSpeed((s) => SPEEDS[(SPEEDS.indexOf(s) + 1) % SPEEDS.length])} className="ml-1 w-11 rounded-full border border-white/15 py-0.5 text-[12px] tabular-nums text-zinc-400 hover:text-zinc-100">{speed}×</button>
-                  </div>
-                  {current && (
-                    <div className="mt-2 grid gap-1 text-[13px]">
-                      <p className="text-[15px] text-zinc-100" aria-live="polite">{current.note}</p>
-                      <p className="truncate text-zinc-500" style={{ fontFamily: monoFont }}>
-                        {current.frames.map((f) => `${f.method}():${f.line}`).join("  ‹  ")}
-                      </p>
-                      {!scopeMode && current.vars.length > 0 && (
-                        <div className="flex flex-wrap gap-1.5 pt-1" style={{ fontFamily: monoFont }}>
-                          {current.vars.map((v) => (
-                            <span key={v.name} className={`rounded-md px-2 py-0.5 text-[12px] transition ${v.changed ? "bg-[#8f6bff]/20 text-zinc-50" : "bg-white/5 text-zinc-300"}`}>
-                              <span className="text-zinc-500">{v.name} =</span> {v.value}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
+              {playback}
               </>
               )}
             </section>
@@ -744,18 +1003,29 @@ export function Workspace({ monoFont }: { monoFont: string }) {
         )}
       </div>
 
-      {importing && <ImportDialog existing={project.files.map((f) => f.path)} onImport={importFiles} onClose={() => setImporting(false)} />}
+      {importing && <ImportDialog existing={project.files} onImport={importFiles} onClose={() => setImporting(false)} />}
       {confirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" role="alertdialog" aria-modal="true" aria-label={confirm.title}>
           <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-[#05070b] p-6">
             <h2 className="text-lg font-semibold text-zinc-50">{confirm.title}</h2>
             <p className="mt-2 text-sm text-zinc-400">{confirm.body}</p>
-            <div className="mt-6 flex justify-end gap-2">
+            <div className="mt-6 flex flex-wrap justify-end gap-2">
               <button autoFocus onClick={() => setConfirm(null)} className="rounded-full px-4 py-2 text-sm text-zinc-400 hover:text-zinc-100">Cancel</button>
+              {confirm.alt && (
+                <button
+                  onClick={() => {
+                    setConfirm(null);
+                    confirm.alt!.onClick();
+                  }}
+                  className="rounded-full border border-white/15 px-4 py-2 text-sm text-zinc-300 hover:border-white/30 hover:text-zinc-50"
+                >
+                  {confirm.alt.label}
+                </button>
+              )}
               <button
                 onClick={() => {
-                  confirm.onConfirm();
                   setConfirm(null);
+                  confirm.onConfirm();
                 }}
                 className={`rounded-full px-4 py-2 text-sm font-semibold ${confirm.danger ? "bg-[#ff5d73] text-black hover:bg-[#ff7a8c]" : "bg-zinc-50 text-black hover:bg-white"}`}
               >

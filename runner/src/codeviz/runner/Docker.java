@@ -133,7 +133,9 @@ public final class Docker {
   static void prepare(Workspace ws) throws java.io.IOException {
     try (var walk = Files.walk(ws.src)) {
       for (Path p : walk.toList()) {
-        Files.setPosixFilePermissions(p, PosixFilePermissions.fromString(Files.isDirectory(p) ? "rwxr-xr-x" : "rw-r--r--"));
+        /* Writable by the sandbox user: programs may create and change files in their working folder.
+           The folder is this job's own copy and is removed afterwards. */
+        Files.setPosixFilePermissions(p, PosixFilePermissions.fromString(Files.isDirectory(p) ? "rwxrwxrwx" : "rw-rw-rw-"));
       }
     }
     for (Path p : List.of(ws.root, ws.out, ws.tmp)) Files.setPosixFilePermissions(p, PosixFilePermissions.fromString("rwxrwxrwx"));
@@ -160,8 +162,15 @@ public final class Docker {
         "--ulimit", "fsize=8388608:8388608",
         "--ulimit", "nofile=256:256",
         "-v", ws.root + ":" + WORK + ":rw",
-        "-w", WORK,
+        /* The project folder, so programs find project files by relative path. Compiling uses absolute paths. */
+        "-w", map(ws, ws.src),
         image));
+    /*
+     * Everything the sandbox user writes in the job folder (package folders under out/, class
+     * files, the trace result) must stay readable and removable by the runner, which runs as a
+     * different user. An open umask does that; the folder is per-job and already world-writable.
+     */
+    cmd.addAll(List.of("sh", "-c", "umask 0000 && exec \"$@\"", "sh"));
     cmd.addAll(containerCommand);
     return cmd;
   }

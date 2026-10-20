@@ -30,20 +30,18 @@ export function createJourneyScene(container: HTMLElement, options: JourneyOptio
   /* Night landscape: sky, mountains, water, and particles. Fog fades structures into the same navy. */
   const env = createEnvironment({ waterY: -3.6, reducedMotion: options.reducedMotion });
   scene.add(env.group);
-  scene.background = env.fogColor.clone();
-  const fog = new THREE.Fog(env.fogColor, 26, 80);
+  /* A plain black sky; distant structures fade into the same black. */
+  env.sky.visible = false;
+  scene.background = new THREE.Color(0x000000);
+  const fog = new THREE.Fog(0x000000, 26, 80);
   scene.fog = fog;
   const envMap = addEnvironment(renderer, scene);
   scene.environmentIntensity = 0.6;
 
+  /* A plain white grid floor: no rippling water under it. */
+  env.water.visible = false;
   const grid = createInfiniteGrid(-3.6);
-  /* The grid lies on the water, tinted to match the night. */
-  {
-    const u = (grid.mesh.material as THREE.ShaderMaterial).uniforms;
-    u.uMinor.value.set("#1a2a5e");
-    u.uMajor.value.set("#3554a8");
-    grid.mesh.renderOrder = 2;
-  }
+  grid.mesh.renderOrder = 2;
   scene.add(grid.mesh);
   /* The route the camera travels, drawn on the floor and revealed in the finale. */
   const routeCurve = new THREE.CatmullRomCurve3(

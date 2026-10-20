@@ -1,0 +1,65 @@
+/*
+ * Galaxy sky animation. Global, not a CSS module: this project's Turbopack config treats every
+ * .css file as global, so every class carries the cvg- prefix. Layout lives in inline styles in
+ * galaxy-sky.tsx, so the sky stays behind the page even if this file never loads; this file only
+ * adds motion. Opacity and transform only, so the browser animates it without repainting.
+ */
+.cvg-fallback { transition: opacity 1.4s ease; }
+.cvg-sky[data-ready="true"][data-webgl="true"] .cvg-fallback { opacity: 0; }
+.cvg-layer { opacity: 0; transition: opacity 1.4s ease; }
+.cvg-sky[data-ready="true"] .cvg-layer { opacity: 1; }
+
+/* The whole sky turns and drifts, about three minutes each way. */
+.cvg-drift {
+  animation-name: cvg-drift;
+  animation-duration: 180s;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  animation-direction: alternate;
+  will-change: transform;
+}
+@keyframes cvg-drift {
+  from { transform: translate3d(-1.6%, 0.8%, 0) rotate(-1.4deg) scale(1.1); }
+  to { transform: translate3d(1.6%, -0.8%, 0) rotate(1.4deg) scale(1.13); }
+}
+
+/* Groups of brighter stars that brighten and fade out of step. */
+.cvg-twinkle {
+  opacity: 0;
+  will-change: opacity;
+  animation-name: cvg-twinkle;
+  animation-duration: var(--period, 7s);
+  animation-delay: var(--delay, 0s);
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+}
+@keyframes cvg-twinkle {
+  0%, 100% { opacity: 0; }
+  50% { opacity: 0.9; }
+}
+
+/* The galactic core breathes. */
+.cvg-glow {
+  will-change: opacity, transform;
+  animation: cvg-breathe 14s ease-in-out infinite;
+}
+@keyframes cvg-breathe {
+  0%, 100% { opacity: 0.35; transform: translate(-50%, -50%) rotate(-9deg) scale(0.96); }
+  50% { opacity: 1; transform: translate(-50%, -50%) rotate(-9deg) scale(1.05); }
+}
+
+/* Distant haze sliding along the band. */
+.cvg-haze {
+  will-change: transform;
+  animation: cvg-haze 70s ease-in-out infinite alternate;
+}
+@keyframes cvg-haze {
+  from { transform: translate3d(-5%, 1%, 0); }
+  to { transform: translate3d(5%, -1%, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cvg-drift, .cvg-twinkle, .cvg-glow, .cvg-haze { animation: none; }
+  .cvg-drift { transform: scale(1.1); }
+  .cvg-twinkle { opacity: 0.3; }
+}

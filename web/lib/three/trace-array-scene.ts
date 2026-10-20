@@ -1,9 +1,9 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { CSS2DObject, CSS2DRenderer } from "three/examples/jsm/renderers/CSS2DRenderer.js";
-import { WORKSPACE_STARS, addEnvironment, createComposer, createRenderer, createSpaceBackdrop, createStars, disposeObject, prefersReducedMotion } from "./core";
-import { WORKSPACE_GRID, createInfiniteGrid } from "./journey/grid";
+import { addEnvironment, createComposer, createRenderer, disposeObject, prefersReducedMotion } from "./core";
 import { createIdentifierLabel } from "./identifier-label";
+import { createInfiniteGrid } from "./journey/grid";
 import { identifier } from "../trace/types";
 import { JOURNEY, NodeVisual, boxKit, type NodeState } from "./journey/visuals";
 import type { ArrayView } from "../trace/interpret";
@@ -31,13 +31,12 @@ export function createTraceArrayScene(container: HTMLElement, length: number, fo
   container.appendChild(labels.domElement);
 
   const scene = new THREE.Scene();
-  const backdrop = createSpaceBackdrop();
-  scene.background = backdrop;
+  scene.background = new THREE.Color(0x000000);
   scene.fog = new THREE.Fog(0x000000, 20, 70);
   const envMap = addEnvironment(renderer, scene);
   scene.environmentIntensity = 0.6;
-  scene.add(createStars(WORKSPACE_STARS.count, 13, WORKSPACE_STARS.look));
-  const grid = createInfiniteGrid(-1.8, WORKSPACE_GRID);
+  /* The same white grid floor as the landing page, under the structures. */
+  const grid = createInfiniteGrid(-1.8);
   scene.add(grid.mesh);
   const still = prefersReducedMotion();
 
@@ -97,7 +96,10 @@ export function createTraceArrayScene(container: HTMLElement, length: number, fo
   controls.maxPolarAngle = Math.PI * 0.56;
 
   const composer = createComposer(renderer, scene, camera, { strength: 0.5, radius: 0.4, threshold: 0.86 });
-  const wasd = attachWasd(renderer.domElement, container, camera, controls);
+  /* Once the user moves the camera (drag, zoom, or W A S D), only Reset view moves it again. */
+  let userMoved = false;
+  controls.addEventListener("start", () => (userMoved = true));
+  const wasd = attachWasd(renderer.domElement, container, camera, controls, () => (userMoved = true));
   const resetView = () => {
     const halfW = (PER_ROW * (CELL + GAP)) / 2 + 1.2;
     const halfH = (ROWS * ROW_H) / 2 + 1.9;
@@ -120,7 +122,8 @@ export function createTraceArrayScene(container: HTMLElement, length: number, fo
   resetView();
   const ro = new ResizeObserver(() => {
     resize();
-    resetView();
+    /* Until the user takes the camera, keep the starting view fitted to the panel. */
+    if (!userMoved) resetView();
   });
   ro.observe(container);
 
@@ -200,7 +203,10 @@ export function createTraceArrayScene(container: HTMLElement, length: number, fo
 
   return {
     setState,
-    resetView,
+    resetView: () => {
+      userMoved = false;
+      resetView();
+    },
     camera,
     dispose() {
       cancelAnimationFrame(frame);
@@ -209,7 +215,6 @@ export function createTraceArrayScene(container: HTMLElement, length: number, fo
       controls.dispose();
       disposeObject(scene);
       envMap.dispose();
-      backdrop.dispose();
       composer.dispose();
       renderer.dispose();
       renderer.domElement.remove();

@@ -1,0 +1,362 @@
+/* Global (not a CSS module): this project's Turbopack config treats every .css file as global, so classes carry the cvi- prefix instead. */
+/*
+ * The class hierarchy as cards joined by connectors, over the workspace's grid floor. Cyan marks
+ * the code running now, a cyan outline marks the object's own class, violet marks overrides.
+ */
+.cvi-root {
+  --panel: rgba(6, 9, 15, 0.86);
+  --line: rgba(255, 255, 255, 0.08);
+  --text: #e7e9ef;
+  --text-2: #9aa3b5;
+  --text-3: #6b7385;
+  --cyan: #6fe9ff;
+  --violet: #a996ff;
+  --steel: #93a4c3;
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  color: var(--text);
+  font-size: 12.5px;
+}
+.cvi-bar {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 8px;
+}
+.cvi-heading {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.cvi-meta {
+  font-family: var(--cv-mono);
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.cvi-spacer {
+  flex: 1;
+}
+.cvi-tool {
+  border: 1px solid var(--line);
+  background: rgba(6, 9, 15, 0.7);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 11.5px;
+  border-radius: 999px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.cvi-tool:hover {
+  color: var(--text);
+}
+.cvi-tool:focus-visible,
+.cvi-member:focus-visible,
+.cvi-cardHead:focus-visible {
+  outline: 2px solid rgba(111, 233, 255, 0.6);
+  outline-offset: 1px;
+}
+
+.cvi-notice {
+  position: relative;
+  z-index: 2;
+  margin: 0 12px 8px;
+  padding: 7px 10px;
+  border-radius: 9px;
+  font-size: 12px;
+  color: #e9d9a6;
+  background: rgba(242, 201, 76, 0.08);
+  border: 1px solid rgba(242, 201, 76, 0.2);
+}
+
+/* What the running frame means: which variable, which object, which implementation. */
+.cvi-dispatch {
+  position: relative;
+  z-index: 2;
+  margin: 0 12px 8px;
+  padding: 8px 11px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid rgba(111, 233, 255, 0.16);
+  line-height: 1.5;
+  color: var(--text-2);
+}
+.cvi-dispatch code {
+  font-family: var(--cv-mono);
+  font-size: 12px;
+  color: var(--text);
+}
+.cvi-dispatch .cvi-run {
+  color: var(--cyan);
+}
+
+.cvi-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.cvi-canvas {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+}
+.cvi-canvas[data-dragging="true"] {
+  cursor: grabbing;
+}
+.cvi-world {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+}
+.cvi-edges {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.cvi-card {
+  position: absolute;
+  box-sizing: border-box;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  cursor: default;
+  transition: border-color 200ms ease, box-shadow 200ms ease, opacity 200ms ease;
+}
+.cvi-card[data-selected="true"] {
+  border-color: rgba(255, 255, 255, 0.28);
+}
+.cvi-card[data-object="true"] {
+  border-color: rgba(111, 233, 255, 0.45);
+}
+.cvi-card[data-running="true"] {
+  border-color: rgba(111, 233, 255, 0.7);
+  box-shadow: 0 0 0 1px rgba(111, 233, 255, 0.25), 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+.cvi-card[data-dim="true"] {
+  opacity: 0.5;
+}
+.cvi-cardHead {
+  display: block;
+  width: 100%;
+  padding: 9px 11px 6px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.cvi-name {
+  font-family: var(--cv-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cvi-badge {
+  margin-left: 6px;
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--text-3);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 0 5px;
+  vertical-align: 1px;
+}
+.cvi-sub {
+  margin-top: 2px;
+  font-family: var(--cv-mono);
+  font-size: 10.5px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cvi-members {
+  list-style: none;
+  margin: 0;
+  padding: 0 6px 6px;
+}
+.cvi-member {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  height: 19px;
+  padding: 0 5px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-2);
+  font-family: var(--cv-mono);
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.cvi-member:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+}
+.cvi-member[data-running="true"] {
+  background: rgba(111, 233, 255, 0.1);
+  color: var(--text);
+}
+.cvi-mark {
+  flex-shrink: 0;
+  width: 10px;
+  color: var(--text-3);
+  text-align: center;
+}
+.cvi-member[data-override="true"] .cvi-mark {
+  color: var(--violet);
+}
+.cvi-member[data-running="true"] .cvi-mark {
+  color: var(--cyan);
+}
+.cvi-abstractName {
+  font-style: italic;
+}
+.cvi-ran {
+  margin-left: auto;
+  flex-shrink: 0;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--cyan);
+  opacity: 0.65;
+}
+.cvi-more {
+  padding: 0 11px 7px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+/* The selected class in full: chain, members by category, fields. */
+.cvi-inspector {
+  position: relative;
+  z-index: 2;
+  width: clamp(220px, 38%, 320px);
+  margin: 0 12px 12px 0;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+.cvi-inspector h3 {
+  margin: 0;
+  padding: 10px 12px 2px;
+  font-family: var(--cv-mono);
+  font-size: 13.5px;
+}
+.cvi-chain {
+  padding: 0 12px 8px;
+  font-family: var(--cv-mono);
+  font-size: 11px;
+  color: var(--text-3);
+  line-height: 1.6;
+}
+.cvi-chain button {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--text-2);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline dotted rgba(255, 255, 255, 0.25);
+  text-underline-offset: 3px;
+}
+.cvi-section {
+  border-top: 1px solid var(--line);
+}
+.cvi-section summary {
+  padding: 7px 12px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-2);
+  cursor: pointer;
+  list-style: none;
+}
+.cvi-section summary::-webkit-details-marker {
+  display: none;
+}
+.cvi-section summary::before {
+  content: "▸ ";
+  color: var(--text-3);
+}
+.cvi-section[open] summary::before {
+  content: "▾ ";
+}
+.cvi-section .cvi-members {
+  padding-bottom: 8px;
+}
+.cvi-section .cvi-member {
+  height: auto;
+  min-height: 19px;
+  white-space: normal;
+}
+.cvi-why {
+  color: var(--text-3);
+  font-size: 10.5px;
+}
+.cvi-legend {
+  padding: 8px 12px 10px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--text-3);
+  line-height: 1.6;
+}
+
+.cvi-empty {
+  position: relative;
+  z-index: 2;
+  margin: auto;
+  max-width: 340px;
+  padding: 24px;
+  text-align: center;
+  color: var(--text-2);
+  line-height: 1.55;
+}
+.cvi-empty strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text);
+  font-size: 15px;
+}
+
+@media (max-width: 720px) {
+  .cvi-body {
+    flex-direction: column;
+  }
+  .cvi-inspector {
+    width: auto;
+    max-height: 42%;
+    margin: 0 12px 12px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cvi-card {
+    transition: none;
+  }
+}

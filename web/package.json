@@ -9,7 +9,9 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@codemirror/lang-cpp": "^6.0.2",
     "@codemirror/lang-java": "^6.0.2",
+    "@codemirror/lang-python": "^6.1.6",
     "@codemirror/language": "^6.13.1",
     "@codemirror/lint": "^6.9.7",
     "@codemirror/state": "^6.7.6",

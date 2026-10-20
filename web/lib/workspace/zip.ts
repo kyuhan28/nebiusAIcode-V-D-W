@@ -1,5 +1,5 @@
 /**
- * Reads .java files from uploads and .zip archives entirely in the browser, using the
+ * Reads .java and .py files from uploads and .zip archives entirely in the browser, using the
  * platform's DecompressionStream, so no archive library is needed. Uploaded content is
  * treated as untrusted: paths are validated, sizes are capped, and nothing is extracted to disk.
  */
@@ -18,7 +18,7 @@ async function inflate(data: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
-/** Lists a ZIP's entries from its central directory and returns the .java files. */
+/** Lists a ZIP's entries from its central directory and returns the .java and .py files. */
 export async function readZip(buffer: ArrayBuffer): Promise<{ entries: { path: string; data: Uint8Array | null; reason?: string }[] }> {
   const view = new DataView(buffer);
   const bytes = new Uint8Array(buffer);
@@ -49,7 +49,7 @@ export async function readZip(buffer: ArrayBuffer): Promise<{ entries: { path: s
     const path = decoder.decode(bytes.subarray(ptr + 46, ptr + 46 + nameLen));
     ptr += 46 + nameLen + extraLen + commentLen;
     if (path.endsWith("/")) continue;
-    if (!path.endsWith(".java")) { entries.push({ path, data: null, reason: "Not a .java file" }); continue; }
+    if (!/\.(java|py|c|h|cpp|cc|cxx|hpp|hh|hxx|txt|csv|tsv|json|md|xml|ya?ml|toml|ini|cfg)$/.test(path)) { entries.push({ path, data: null, reason: "Not a source or data file" }); continue; }
     if (flags & 1) { entries.push({ path, data: null, reason: "Encrypted entries are not supported" }); continue; }
     if (size > MAX_FILE) { entries.push({ path, data: null, reason: "Larger than 256 KB" }); continue; }
     total += size;
@@ -88,7 +88,7 @@ export async function previewImport(uploads: { name: string; data: ArrayBuffer }
       } catch (e) {
         skipped.push({ path: u.name, reason: (e as Error).message });
       }
-    } else if (u.name.endsWith(".java")) {
+    } else if (/\.(java|py)$/.test(u.name)) {
       if (u.data.byteLength > MAX_FILE) skipped.push({ path: u.name, reason: "Larger than 256 KB" });
       else raw.push({ path: u.name, data: new Uint8Array(u.data) });
     } else skipped.push({ path: u.name, reason: "Only .java files and .zip archives can be imported" });

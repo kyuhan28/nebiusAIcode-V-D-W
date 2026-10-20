@@ -31,6 +31,12 @@ cd runner
 RUNNER_TOKEN=dev-token ./start.sh
 ```
 
+**Process mode is for running your own code on your own machine.** Programs get no network, their
+own process tree, a cleared environment, and CPU, memory, and output limits, but **no filesystem
+isolation**: a program can read and write any file the runner's user can, including `web/.env.local`
+(where the NVIDIA key lives) and the runner's own files. Use Docker mode for anything shared, public,
+or not written by you. The runner prints a reminder when it starts in process mode.
+
 ### Docker mode (recommended once Docker works)
 
 From the repo root:
@@ -81,6 +87,80 @@ only executes tests; the web server compares outputs, so hidden expected answers
 Statuses: `queued`, `compiling`, `running`, then `completed`, `compile_failed`, `runtime_error`,
 `timed_out`, `cancelled`, or `failed`. Errors look like `{ error: { code, message } }`.
 
+## Python programs
+
+The runner also runs Python 3 with the real interpreter (CPython, not a reimplementation). A request
+with `"language": "python"` (or a `mainClass` ending in `.py`) is a Python job; `mainClass` is then the
+entry file's path, such as `examples/py_pascal/pascal_memo.py`.
+
+- **Interpreter.** Docker mode uses the sandbox image's `python3`, Python 3.12 from Ubuntu 24.04
+  (`eclipse-temurin:21-jdk-noble`). Process mode uses the host's `python3`, or `RUNNER_PYTHON` if
+  set; 3.11 or newer is recommended (older versions work, with less exact class names in traces).
+  `GET /v1/runtime` reports the version as `python.version`.
+- **Steps.** `bin/pyrun.py` is copied into each job folder and does the work: `check` compiles every
+  `.py` file and reports syntax errors as diagnostics (the Compile step), `run` executes the entry
+  file, and `trace` records it with `sys.settrace` in the same trace format as Java (below).
+- **Files and imports.** All project files keep their folders. The entry file's folder and the
+  project root are on `sys.path`, so sibling modules and packages import as they would with
+  `python main.py` run from the project folder. An entry file inside a package (folders with
+  `__init__.py`) runs as that package's module, so relative imports work.
+- **Input.** The program reads the request's `stdin` (the Input tab) through `input()` and
+  `sys.stdin`; at the end of the input, `input()` raises `EOFError` as usual. Input is given in
+  full before the run starts; it is not a live console, so prompts and answers are not interleaved.
+- **Errors.** A crash gives Python's traceback on stderr (project-relative paths, the bootstrap's
+  own frames removed) and `exception: { type, message, sourcePath, line, method }`.
+- **Class model.** Run and trace results include `hierarchy` (see below), read from the real class
+  objects after the run, so overrides follow Python's method resolution order.
+- **Isolation.** Python runs in exactly the same sandbox as Java: the same container or namespace
+  isolation, no network, a cleared environment (no runner token, no API keys), the same timeouts
+  and output caps. `pyrun.py` also sets hard limits on memory (512 MB, 1 GB when tracing), CPU time,
+  and file size that the program cannot raise. Problem tests (`mode: "test"`) are Java only.
+
+What a Python trace records: every line about to run in project files, each call as its own frame
+with its parameters and local variables (with their runtime types), return values, module-level
+globals (as `statics`, keyed `module.name`), lists, tuples, dicts, sets, deques, and objects with
+their attributes, `input()` calls, and the line of an uncaught exception. `self` is the receiver.
+Not recorded: code in the standard library, conversions such as `int(text)` as separate input
+events, values inside generators between yields (their steps are recorded, their returns are not),
+and C-level internals. Long loops stop at the step limit like Java.
+
+### Python compatibility, level by level
+
+These are different things and are reported separately. Every line below was checked by
+`tests/test_python_compat.py` (or `tests/test_python.py`) unless it says otherwise.
+
+| Level | What is available |
+| --- | --- |
+| Language | Everything CPython 3.12 implements: it is the real interpreter, unmodified. Checked: `match`, the walrus operator, f-string specifiers, PEP 695 generics, dataclasses, enums, properties, operator overloading, multiple inheritance and the MRO, closures, `nonlocal`, decorators, generators and `yield from`, iterators, positional-only, keyword-only, `*args` and `**kwargs`, custom and chained exceptions, `except*` groups, context managers, ABCs, `__slots__`, class and static methods, typing (`TypedDict`, `Protocol`, annotations), `async`/`await`, async generators, comprehensions, slicing, unpacking, bitwise operators, `lru_cache`. |
+| Built-ins | All of them, unchanged (the recorder wraps `input()` while tracing and calls the real one). Checked: about 90 built-ins, including `eval`, `exec`, `compile`, `help()` (prints to the output, no pager). |
+| Standard library | The whole library that ships with Python 3.12. Checked: 100 modules import in the sandbox (math to `sqlite3`, `zoneinfo`, `asyncio`, `multiprocessing`, `tomllib`, `unittest`, `doctest`, `pdb`, ...), and about 50 of them are exercised. |
+| Files | Programs run in their project folder and may read project files (data files such as `.csv`, `.json`, `.txt` can be part of a project) and create, change, and delete files there; `tempfile` and `HOME` point at the job's own tmp folder. Everything is removed when the run ends. Checked: text and binary files, encodings, `pathlib`, `csv`, `json`, an SQLite file, zip, tar, gzip, bz2, lzma, `shutil`, `glob`. |
+| Concurrency | Threads, `queue`, thread and process pools, `multiprocessing.Pool`, and `asyncio` all run. Checked. |
+| Third-party packages | Only what `python-requirements.txt` installs into the image (pinned). Checked at those versions: numpy, pandas, matplotlib, scipy, scikit-learn, sympy, networkx, Pillow, python-dateutil, requests (imports; requests cannot reach the network). Listed but not yet checked: pytest, tzdata. In process mode, packages are whatever the runner's Python has installed. |
+| Sandbox restrictions | No network (sockets fail; `requests` raises `ConnectionError`), a cleared environment, no files outside the job folder in Docker mode (process mode has no filesystem isolation; see Process mode above), memory capped (`MemoryError`), CPU and wall time capped (the run is stopped), output capped, process count capped (Docker `--pids-limit 128`). matplotlib has no display: use `savefig`; `plt.show()` does nothing. Input is given before the run, not typed live. |
+| Recording (Visualize) | What runs in project files: lines, calls and returns, frames, locals and types, module globals, lists, tuples, dicts, sets, deques, objects, numpy arrays (1-D and 2-D, first rows) and scalars, pandas Series and DataFrames (first rows and columns), `input()` calls, uncaught exceptions. Library code (standard or third-party) runs at full speed and is not recorded step by step. Only the main thread is recorded; other threads and child processes run but are not recorded, and in Visualize mode their printed output is not captured. Checked: a recorded run prints exactly what the normal run prints. |
+
+**Adding a package.** Packages are installed when the sandbox image is built, never by user programs
+and never while a program runs, so one project cannot change another's environment:
+
+1. Add a pinned line to `runner/python-requirements.txt`, for example `beautifulsoup4==4.12.3`.
+2. Rebuild the image: `docker build -t codeviz-java-sandbox:21 -f runner/sandbox.Dockerfile runner`.
+   The image records what it installed in `/opt/codeviz/python-installed.txt`.
+3. Add a check to `tests/test_python_compat.py` and run it.
+
+`GET /v1/runtime` lists the installed packages and versions as `python.packages`. Importing a
+package that is not installed gives the normal `ModuleNotFoundError` plus a note saying so.
+Packages that need a display, a GPU, root, or the network will not work in the sandbox; packages
+with native code work when their wheels support Linux x86-64 or arm64 (all of the above do). For a
+smaller image, build with `--build-arg PY_REQUIREMENTS=<a shorter file>`. In process mode, install
+packages into a virtual environment and point the runner at it:
+`python3 -m venv .pyenv && .pyenv/bin/pip install -r python-requirements.txt`, then start the runner
+with `RUNNER_PYTHON=$PWD/.pyenv/bin/python`.
+
+After changing `bin/pyrun.py` or anything in `src/`, rebuild the sandbox image in Docker mode
+(`docker build -t codeviz-java-sandbox:21 -f sandbox.Dockerfile .` or `docker compose --profile image build`).
+In process mode `start.sh` picks up changes by itself.
+
 ## Trace format (version 2)
 
 A `trace` result holds `steps`, one per recorded moment, plus `classes` (declared field and static
@@ -110,6 +190,19 @@ example) gets the same frames, labels, and call stack.
 Values are `{ "t": type, "v": value }` for primitives, boxed values, and strings, `{ "t": "null" }`,
 or `{ "t": "ref", "id": "..." }` pointing into `heap`. Version 1 traces (no `id`, `types`, or `return`
 steps) are still read; their frames are keyed by depth and their labels use runtime classes.
+
+Frames also carry `sig`, the running method's JVM descriptor (`(I)V`), on their first step, so a
+frame can be matched to one overload in the class model below.
+
+### Class model (`hierarchy`)
+
+Every clean compile, in any mode, adds `hierarchy` to the result: one entry per class, interface,
+enum, or record, collected from javac's own analysis while it compiles (nothing is guessed from
+file or class names). Each entry has `name` (binary name), `kind`, `abstract`, `file`, `line`,
+`superclass`, `interfaces`, `fields`, and `methods`; each method has its `descriptor`, `params`,
+`modifiers`, `line`, `implicit` (a constructor the compiler wrote), and `overrides`, the nearest
+supertype method it overrides by javac's rules, as `binary.Class#name`. A failed compile sends no
+`hierarchy`, so a diagram is never drawn from half-analyzed code.
 
 Known limits: a frame unwound by an exception is retired at the next recorded step rather than at
 the throw (the JVM sends no exit event for it); two variables with the same name in sibling blocks
@@ -150,6 +243,8 @@ cd runner/tests
 python3 test_basic.py        # output, diagnostics, exceptions, packages, entry points, stdin
 python3 test_security.py     # timeouts, stop, caps, paths, memory, network, files, processes, rate limits
 python3 test_trace.py        # traces of sorting, objects, recursion, frames and returns, declared types, exceptions, limits
+python3 test_python.py       # Python: output, input, errors, limits, imports, recording, sandbox boundaries
+python3 test_python_compat.py  # Python compatibility: language, built-ins, stdlib, files, concurrency, packages, limits
 python3 test_examples.py     # all 20 examples: exact output, no warnings, complete traces
 python3 test_problems.py     # reference solutions pass; wrong ones fail for the right reasons
 ```

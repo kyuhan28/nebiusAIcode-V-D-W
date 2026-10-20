@@ -18,7 +18,7 @@ public final class Workspace implements AutoCloseable {
   public record SourceFile(String path, String content) {}
   public record EntryPoint(String className, String path) {}
 
-  private static final Pattern SAFE_PATH = Pattern.compile("^[A-Za-z0-9_$][A-Za-z0-9_$.\\-]*(/[A-Za-z0-9_$][A-Za-z0-9_$.\\-]*)*\\.java$");
+  private static final Pattern SAFE_PATH = Pattern.compile("^[A-Za-z0-9_$][A-Za-z0-9_$.\\-]*(/[A-Za-z0-9_$][A-Za-z0-9_$.\\-]*)*\\.(java|py|c|h|cpp|cc|cxx|hpp|hh|hxx|txt|csv|tsv|json|md|xml|ya?ml|toml|ini|cfg)$");
   private static final Pattern PACKAGE = Pattern.compile("(?m)^\\s*package\\s+([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*)\\s*;");
   private static final Pattern MAIN = Pattern.compile("static\\s+(?:final\\s+)?void\\s+main\\s*\\(\\s*(?:final\\s+)?String\\s*(?:\\[\\s*]\\s*\\w+|\\.\\.\\.\\s*\\w+|\\w+\\s*\\[\\s*])");
   private static final Pattern TYPE = Pattern.compile("(?m)^\\s*(?:public\\s+|final\\s+|abstract\\s+)*(?:class|record|enum|interface)\\s+([A-Za-z_$][\\w$]*)");
@@ -56,12 +56,12 @@ public final class Workspace implements AutoCloseable {
 
   /** Checked when the request arrives, so bad uploads are refused before anything is queued. */
   static void validate(Config cfg, List<SourceFile> files) throws RunnerException {
-    if (files.isEmpty()) throw new RunnerException(400, "no_files", "Add at least one .java file.");
+    if (files.isEmpty()) throw new RunnerException(400, "no_files", "Add at least one .java or .py file.");
     if (files.size() > cfg.maxFiles()) throw new RunnerException(413, "too_many_files", "Projects are limited to " + cfg.maxFiles() + " files.");
     long total = 0;
     for (SourceFile f : files) {
       if (f.path() == null || !SAFE_PATH.matcher(f.path()).matches() || f.path().contains(".."))
-        throw new RunnerException(400, "bad_path", "File paths must be relative .java paths without '..': " + f.path());
+        throw new RunnerException(400, "bad_path", "File paths must be relative paths to source files (.java, .py, .c, .h, .cpp, .hpp, ...) or data files (.txt, .csv, .json, ...) without '..': " + f.path());
       total += f.content().getBytes(StandardCharsets.UTF_8).length;
     }
     if (total > cfg.maxSourceBytes()) throw new RunnerException(413, "too_large", "Source files are limited to " + (cfg.maxSourceBytes() / 1024) + " KB in total.");
@@ -75,6 +75,7 @@ public final class Workspace implements AutoCloseable {
   static List<EntryPoint> entryPoints(List<SourceFile> files) {
     List<EntryPoint> found = new ArrayList<>();
     for (SourceFile f : files) {
+      if (!f.path().endsWith(".java")) continue;
       String code = stripComments(f.content());
       if (!MAIN.matcher(code).find()) continue;
       Matcher pkg = PACKAGE.matcher(code);
@@ -112,13 +113,19 @@ public final class Workspace implements AutoCloseable {
     return src.relativize(p).toString();
   }
 
+  /**
+   * Removes the job folder. Never throws: a folder the runner cannot read or delete (one a Docker
+   * sandbox user created) is left behind with a note in the log, and the run's result stands.
+   */
   @Override
   public void close() {
     try (Stream<Path> s = Files.walk(root)) {
       s.sorted(Comparator.reverseOrder()).forEach(p -> {
         try { Files.deleteIfExists(p); } catch (IOException ignored) {}
       });
-    } catch (IOException ignored) {}
+    } catch (IOException | RuntimeException e) {
+      System.err.println("[runner] could not fully remove " + root + ": " + e);
+    }
   }
 
   static List<SourceFile> fromRequest(Object raw) throws RunnerException {

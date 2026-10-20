@@ -9,16 +9,11 @@ export type GridLook = {
   majorAlpha: number;
 };
 
-/** The landing page's floor. */
-export const JOURNEY_GRID: GridLook = { minor: "#1b1f28", major: "#2e3442", cell: 2, minorAlpha: 0.7, majorAlpha: 1 };
 /**
- * The workspace floor: a quiet graphite grid with a faint cyan cast on the major lines, kept well
- * below the brightness of labels and values so it reads as space, not content. Tuned for the
- * output pass: ACES tone mapping crushes very dark colors to black, so these hex values sit a
- * little above how dim they finally look (major lines land near rgb(7, 35, 51)).
+ * The white grid floor (landing page and visualizer): subtle and see-through, so it gives the
+ * space a floor without competing with what sits on it. Minor lines are barely there.
  */
-export const WORKSPACE_GRID: GridLook = { minor: "#222b38", major: "#1f4656", cell: 1.5, minorAlpha: 0.55, majorAlpha: 0.6 };
-
+export const JOURNEY_GRID: GridLook = { minor: "#ffffff", major: "#ffffff", cell: 2, minorAlpha: 0.07, majorAlpha: 0.24 };
 /**
  * An endless-looking floor grid. Lines are computed in world space, so the plane can
  * follow the camera without the lines sliding, and they fade out with distance.

@@ -1,9 +1,9 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { CSS2DObject, CSS2DRenderer } from "three/examples/jsm/renderers/CSS2DRenderer.js";
-import { WORKSPACE_STARS, addEnvironment, createComposer, createRenderer, createSpaceBackdrop, createStars, disposeObject } from "./core";
-import { WORKSPACE_GRID, createInfiniteGrid } from "./journey/grid";
+import { addEnvironment, createComposer, createRenderer, disposeObject } from "./core";
 import { createIdentifierLabel } from "./identifier-label";
+import { createInfiniteGrid } from "./journey/grid";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import { EdgeVisual, JOURNEY, NodeVisual, boxKit, edgeGeometry, nodeMaterial, sphereKit } from "./journey/visuals";
 import type { StructureView } from "../trace/structures";
@@ -268,13 +268,12 @@ export function createStructureScene(container: HTMLElement, fontFamily: string)
   container.appendChild(labels.domElement);
 
   const scene = new THREE.Scene();
-  const backdrop = createSpaceBackdrop();
-  scene.background = backdrop;
+  scene.background = new THREE.Color(0x000000);
   scene.fog = new THREE.Fog(0x000000, 24, 80);
   const envMap = addEnvironment(renderer, scene);
   scene.environmentIntensity = 0.6;
-  scene.add(createStars(WORKSPACE_STARS.count, 17, WORKSPACE_STARS.look));
-  const grid = createInfiniteGrid(-4.2, WORKSPACE_GRID);
+  /* The same white grid floor as the landing page, under the structures. */
+  const grid = createInfiniteGrid(-4.2);
   scene.add(grid.mesh);
 
   const spheres = sphereKit(0.44);
@@ -306,6 +305,13 @@ export function createStructureScene(container: HTMLElement, fontFamily: string)
   const camGoal = new THREE.Vector3(0, 2, 14);
   const lookGoal = new THREE.Vector3();
   let fitPending = true;
+  /*
+   * The camera is framed once, when the first content appears; after that it is the user's.
+   * Steps never move it; only Reset view (resetView) frames the scene again.
+   */
+  let framed = false;
+  /* Set once the user drags, zooms, or walks; until then, resizing keeps the first framing fitted. */
+  let userMoved = false;
 
   const resize = () => {
     const w = container.clientWidth || 1;
@@ -319,12 +325,19 @@ export function createStructureScene(container: HTMLElement, fontFamily: string)
   resize();
   const ro = new ResizeObserver(() => {
     resize();
-    fit();
+    /* Until the user takes the camera, keep the starting view fitted to the panel's new shape. */
+    if (framed && !userMoved) fit(true);
   });
   ro.observe(container);
   /* Stop auto-framing once the user takes the camera, by dragging or by walking. */
-  controls.addEventListener("start", () => (fitPending = false));
-  const wasd = attachWasd(renderer.domElement, container, camera, controls, () => (fitPending = false));
+  controls.addEventListener("start", () => {
+    fitPending = false;
+    userMoved = true;
+  });
+  const wasd = attachWasd(renderer.domElement, container, camera, controls, () => {
+    fitPending = false;
+    userMoved = true;
+  });
 
   /* ---------------- One layer per data structure ---------------- */
   type Layer = ReturnType<typeof makeLayer>;
@@ -701,39 +714,48 @@ export function createStructureScene(container: HTMLElement, fontFamily: string)
   }
 
   function setViews(list: { key: string; title?: string; view: StructureView | null }[]) {
-    let reframe = false;
     const keys = new Set(list.map((x) => x.key));
     layers.forEach((l, key) => {
-      if (!keys.has(key)) { l.dispose(); layers.delete(key); reframe = true; }
+      if (!keys.has(key)) { l.dispose(); layers.delete(key); }
     });
     for (const item of list) {
       let l = layers.get(item.key);
-      if (!l) { l = makeLayer(); layers.set(item.key, l); reframe = true; }
-      if (l.setView(item.view, item.title ?? "")) reframe = true;
+      if (!l) { l = makeLayer(); layers.set(item.key, l); }
+      l.setView(item.view, item.title ?? "");
     }
-    const before = [...layers.values()].map((l) => l.offset.clone());
     arrange();
-    if ([...layers.values()].some((l, i) => !before[i] || l.offset.distanceTo(before[i]) > 0.5)) reframe = true;
-    if (reframe) fit();
+    /* Only the first content is framed automatically; from then on the camera stays where it is. */
+    if (!framed) framed = fit(true);
   }
   function setView(view: StructureView | null, title = "") {
     setViews(view ? [{ key: "main", title, view }] : []);
   }
 
-  const fit = () => {
+  /**
+   * Frames everything currently in the scene. The first framing is instant and leaves extra room,
+   * since structures usually grow as the program runs; Reset view glides to a snug fit.
+   * Returns false when there is nothing to frame yet.
+   */
+  const fit = (first = false): boolean => {
     bounds.makeEmpty();
     layers.forEach((l) => {
       const box = l.localBounds();
       if (!box.isEmpty()) bounds.union(box.clone().translate(l.offset));
     });
-    if (bounds.isEmpty()) return;
+    if (bounds.isEmpty()) return false;
     /* A wider margin when several layers share the view, so labels at the edges stay inside. */
     const size = bounds.getSize(new THREE.Vector3()).addScalar(layers.size > 1 ? 4 : 2.4);
+    if (first) size.multiplyScalar(1.35);
     bounds.getCenter(lookGoal);
     const tanHalf = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
     const dist = Math.max(size.y / 2 / tanHalf, size.x / 2 / (tanHalf * camera.aspect), 7);
     camGoal.copy(lookGoal).add(new THREE.Vector3(dist * 0.12, dist * 0.22, dist));
-    fitPending = true;
+    if (first) {
+      camera.position.copy(camGoal);
+      controls.target.copy(lookGoal);
+      fitPending = false;
+    } else fitPending = true;
+    return true;
   };
 
   const a = new THREE.Vector3();
@@ -765,7 +787,10 @@ export function createStructureScene(container: HTMLElement, fontFamily: string)
   return {
     setView,
     setViews,
-    resetView: fit,
+    resetView: () => {
+      userMoved = false;
+      fit();
+    },
     camera,
     dispose() {
       cancelAnimationFrame(frame);
@@ -774,7 +799,6 @@ export function createStructureScene(container: HTMLElement, fontFamily: string)
       controls.dispose();
       disposeObject(scene);
       envMap.dispose();
-      backdrop.dispose();
       composer.dispose();
       renderer.dispose();
       renderer.domElement.remove();

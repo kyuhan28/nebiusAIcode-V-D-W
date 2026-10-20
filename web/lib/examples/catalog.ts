@@ -3,12 +3,18 @@ export type Example = {
   id: string;
   file: string;
   title: string;
-  category: "Data structures" | "Graph algorithms" | "Sorting and searching" | "Recursion and dynamic programming" | "Compression" | "Machine learning" | "Input and output";
+  category: "Data structures" | "Graph algorithms" | "Sorting and searching" | "Recursion and dynamic programming" | "Compression" | "Machine learning" | "Input and output" | "Object-oriented programming" | "Python";
   summary: string;
   complexity: string;
   visual: "tree" | "list" | "graph" | "map" | "array" | "stack" | "grid" | "points" | "input" | "none";
   /** Standard input the example expects; filled into the Input tab when it opens. */
   stdin?: string;
+  /**
+   * Multi-file examples: paths under public/examples/<dir>/, already written with packages under
+   * examples.<dir>. `file` is then the entry point, relative to the same folder.
+   */
+  dir?: string;
+  files?: string[];
 };
 
 const e = (id: string, title: string, category: Example["category"], summary: string, complexity: string, visual: Example["visual"]): Example => ({
@@ -60,6 +66,61 @@ export const EXAMPLES: Example[] = [
   { ...e("ReadUntilEndExample", "Read until the end", "Input and output", "hasNextInt() keeps a loop going until the input runs out.", "reading an unknown amount", "input"), stdin: "5 10 15\n20\n" },
   { ...e("InvalidNumberExample", "Invalid numbers", "Input and output", "Catch NumberFormatException for lines like \"abc\" and \"3.5\".", "parse errors, handled", "input"), stdin: "12\nabc\n7\n3.5\n" },
   { ...e("ReadMatrixExample", "Reading a matrix", "Input and output", "Read the size, then fill a 2D array value by value.", "a grid filled from input", "input"), stdin: "2 3\n1 2 3\n4 5 6\n" },
+  {
+    ...e("PyHello", "Python basics", "Python", "Variables, runtime types, arithmetic, and f-strings.", "watch a name change type", "none"),
+    file: "hello.py",
+    dir: "py_basics",
+    files: ["hello.py"],
+  },
+  {
+    ...e("PyInput", "Reading input in Python", "Python", "input(), int(), split(), and map(), fed from the Input tab.", "one input() per line", "input"),
+    file: "greet.py",
+    dir: "py_input",
+    files: ["greet.py"],
+    stdin: "Kyu\n19\n3 4\n",
+  },
+  {
+    ...e("PyCollections", "Lists, dicts, sets, tuples", "Python", "Python's collections, slicing, and comprehensions.", "values as they change", "list"),
+    file: "collections_demo.py",
+    dir: "py_collections",
+    files: ["collections_demo.py"],
+  },
+  {
+    ...e("PyFunctions", "Functions, loops, and recursion", "Python", "for and while loops, functions, and a recursive factorial.", "one frame per call", "none"),
+    file: "functions_loops.py",
+    dir: "py_functions",
+    files: ["functions_loops.py"],
+  },
+  {
+    ...e("PyInheritance", "Python inheritance", "Python", "Classes across two files, overriding, and super().", "dispatch picks the object's own method", "none"),
+    file: "main.py",
+    dir: "py_inheritance",
+    files: ["main.py", "animals.py"],
+  },
+  {
+    ...e("PyProject", "A Python package", "Python", "A multi-file project: a package with a relative import.", "imports across folders", "none"),
+    file: "main.py",
+    dir: "py_project",
+    files: ["main.py", "geometry/__init__.py", "geometry/shapes.py", "geometry/report.py"],
+  },
+  {
+    ...e("PyPascal", "Pascal's triangle in Python (DP)", "Python", "Bottom-up, memoized with a dict, and with no cache. Open the Dynamic programming tab.", "O(n²); plain recursion grows exponentially", "grid"),
+    file: "pascal_triangle.py",
+    dir: "py_pascal",
+    files: ["pascal_triangle.py", "pascal_memo.py", "pascal_naive.py"],
+    stdin: "6\n",
+  },
+  {
+    ...e("PascalTriangle", "Pascal's triangle (dynamic programming)", "Recursion and dynamic programming", "Build the triangle bottom-up, then top-down with a cache, then without one. Open the Dynamic programming tab.", "O(n²) for n rows; plain recursion grows exponentially", "grid"),
+    dir: "pascaltriangle",
+    files: ["PascalTriangle.java", "PascalTriangleMemoized.java", "PascalTriangleNaive.java"],
+    stdin: "6\n",
+  },
+  {
+    ...e("InheritanceExample", "Inheritance and polymorphism", "Object-oriented programming", "An abstract Animal, Dog and Cat below it, and ServiceDog below Dog, across folders and packages.", "dispatch picks the object's own method", "none"),
+    dir: "inheritance",
+    files: ["InheritanceExample.java", "animals/Animal.java", "animals/Dog.java", "animals/Cat.java", "animals/ServiceDog.java", "animals/Trained.java"],
+  },
 ];
 
 export const CATEGORIES = [...new Set(EXAMPLES.map((x) => x.category))];

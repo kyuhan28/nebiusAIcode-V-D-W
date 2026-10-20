@@ -1,0 +1,19 @@
+# Third-party packages for Python programs. Installed into the sandbox image when it is built
+# (sandbox.Dockerfile), never by user programs and never at run time.
+#
+# Pinned for reproducible images. "verified" means imported and exercised through the runner by
+# tests/test_python_compat.py at these exact versions on Python 3.12; the others are listed but have
+# not been run by that suite yet. To add a package: add it here, rebuild the sandbox image, and add a
+# check to tests/test_python_compat.py.
+numpy==2.4.4               # verified
+pandas==3.0.2              # verified
+matplotlib==3.10.8         # verified (Agg backend: save figures with savefig; there is no display)
+scipy==1.17.1              # verified
+scikit-learn==1.8.0        # verified
+sympy==1.14.0              # verified
+networkx==3.6.1            # verified
+pillow==12.1.1             # verified
+python-dateutil==2.9.0.post0  # verified
+requests==2.33.1           # verified to import; programs have no network, so requests fail by design
+pytest>=8.3,<9             # not yet verified by the suite
+tzdata>=2024.1             # not yet verified; time zone data for zoneinfo if the image lacks it

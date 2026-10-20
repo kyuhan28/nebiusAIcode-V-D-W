@@ -29,7 +29,7 @@ export async function forward(req: Request, path: string, init: { method: "GET" 
     return new Response(text, { status: res.status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
   } catch {
     return Response.json(
-      { error: { code: "runner_offline", message: "The Java runner isn't reachable. Start it with ./runner/start.sh, or check RUNNER_URL." } },
+      { error: { code: "runner_offline", message: "The code runner isn't reachable, so programs can't run right now. Start it with ./runner/start.sh (or docker compose up -d runner), or check RUNNER_URL in web/.env.local." } },
       { status: 503, headers: { "Cache-Control": "no-store" } },
     );
   }
@@ -53,6 +53,7 @@ export async function sanitizedExecution(req: Request) {
     mode: typeof b.mode === "string" ? b.mode : "run",
     files,
     mainClass: typeof b.mainClass === "string" ? b.mainClass : undefined,
+    language: ["java", "python", "c", "cpp"].includes(b.language as string) ? b.language : undefined,
     stdin: typeof b.stdin === "string" ? b.stdin : "",
   });
 }

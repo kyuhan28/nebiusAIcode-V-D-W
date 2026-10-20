@@ -8,6 +8,12 @@ export type ExecResult = {
   status: ExecStatus;
   mode: "compile" | "run" | "trace";
   javaVersion: string;
+  /** "python" for .py programs; Java results leave it out. */
+  language?: "java" | "python" | "c" | "cpp";
+  /** C and C++: which compiler built it, and what the sanitizers found (every C/C++ run is checked). */
+  compiler?: string;
+  memoryIssues?: MemoryIssue[];
+  pythonVersion?: string;
   sandbox: string;
   diagnostics?: Diagnostic[];
   stdout?: string;
@@ -23,10 +29,34 @@ export type ExecResult = {
   error?: string;
   errorCode?: string;
   trace?: RawTrace;
+  /** javac's class model, after a clean compile (see lib/trace/inheritance.ts). */
+  hierarchy?: unknown[];
 };
 export type Execution = { id: string; status: ExecStatus; result?: ExecResult };
+/** One finding from AddressSanitizer, LeakSanitizer, or UndefinedBehaviorSanitizer, as the runner parsed it. */
+export type MemoryIssue = {
+  tool: string;
+  kind: string;
+  title: string;
+  confirmed: boolean;
+  message?: string;
+  file?: string | null;
+  line?: number | null;
+  function?: string;
+  address?: string;
+  access?: { op: string; size: number; address?: string };
+  region?: string;
+  bytes?: number;
+  objects?: number;
+  direct?: boolean;
+  allocated?: { file?: string | null; line?: number | null; function?: string };
+  freed?: { file?: string | null; line?: number | null; function?: string };
+};
+
 export type Runtime = {
   javaVersion: string;
+  /** The Python 3 interpreter programs run with, when the runner has one. */
+  python?: { available: boolean; version?: string };
   javaVendor: string;
   compilerAvailable: boolean;
   sandbox: { level: "full" | "container" | "partial" | "docker" | "unavailable"; networkIsolated: boolean; traceNetworkIsolated: boolean; resourceLimits: boolean };
@@ -47,7 +77,7 @@ async function json<T>(res: Response): Promise<T> {
 
 export const getRuntime = () => fetch("/api/java/runtime", { cache: "no-store" }).then((r) => json<Runtime>(r));
 
-export const startExecution = (body: { mode: "compile" | "run" | "trace"; files: { path: string; content: string }[]; mainClass?: string | null; stdin?: string }) =>
+export const startExecution = (body: { mode: "compile" | "run" | "trace"; files: { path: string; content: string }[]; mainClass?: string | null; stdin?: string; language?: "java" | "python" | "c" | "cpp" }) =>
   fetch("/api/java/executions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then((r) => json<Execution>(r));
 
 export const cancelExecution = (id: string) =>

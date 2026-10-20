@@ -30,6 +30,8 @@ export type RawFrame = {
   depth?: number;
   /** Parameter names, sent with the frame's first step. */
   args?: string[];
+  /** The running method's JVM descriptor, "(I)V", sent with the frame's first step. */
+  sig?: string;
   /** Declared types of the visible variables, sent when they change. */
   types?: Record<string, string>;
   /** Filled in by normalizeTrace: a stable key for this invocation. */
@@ -65,6 +67,8 @@ export type RawTrace = {
   sourceMap: Record<string, string>;
   /** Trace v2: declared field and static types per user class. */
   classes?: Record<string, ClassInfo>;
+  /** "python" for recordings made by pyrun.py; Java recordings leave it out. */
+  language?: string;
 };
 
 export type ArrayView = {
@@ -129,6 +133,8 @@ const plain = (v: Val) => (v.t === "null" ? null : (v.v as number | string | boo
 function display(v: Val, heap: Record<string, HeapObj>): string {
   if (v.t === "null") return "null";
   if (v.t === "String") return JSON.stringify(v.v);
+  if (v.t === "str") return `'${String(v.v)}'`;
+  if (v.t === "bool") return v.v ? "True" : "False";
   if (v.t === "char" || v.t === "Character") return `'${v.v}'`;
   if (v.t !== "ref") return String(v.v);
   const obj = heap[v.id as string];
@@ -374,7 +380,7 @@ export function interpret(raw: RawTrace, sources: Record<string, string> = {}): 
     }
   }
   /* Variables, frames, and static fields per step, with references marked when the scene draws them. */
-  const build = createScopeBuilder({ classes: trace.classes });
+  const build = createScopeBuilder({ classes: trace.classes, language: trace.language === "python" ? "python" : "java" });
   const arrayLabel = (st: VizStep) => (st.array ? identifier(st.array.name, st.array.type) : "");
   steps.forEach((st, k) => {
     const drawn = new Map<string, string>();

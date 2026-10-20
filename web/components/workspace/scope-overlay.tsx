@@ -3,7 +3,54 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { inspect, type FrameView, type InspectNode, type ScopeView, type VarView } from "@/lib/trace/scope";
 import type { HeapObj } from "@/lib/trace/interpret";
-import styles from "./scope-overlay.module.css";
+import "./scope-overlay.css";
+
+/* Class names in scope-overlay.css. */
+const styles = {
+  root: "cvs-root",
+  panel: "cvs-panel",
+  stackPanel: "cvs-stackPanel",
+  head: "cvs-head",
+  heading: "cvs-heading",
+  headMeta: "cvs-headMeta",
+  headSpacer: "cvs-headSpacer",
+  toggle: "cvs-toggle",
+  varButton: "cvs-varButton",
+  more: "cvs-more",
+  pill: "cvs-pill",
+  sig: "cvs-sig",
+  frames: "cvs-frames",
+  frame: "cvs-frame",
+  frameHead: "cvs-frameHead",
+  sigName: "cvs-sigName",
+  sigArgs: "cvs-sigArgs",
+  sigChanged: "cvs-sigChanged",
+  frameMeta: "cvs-frameMeta",
+  tags: "cvs-tags",
+  tag: "cvs-tag",
+  summary: "cvs-summary",
+  inlineLink: "cvs-inlineLink",
+  received: "cvs-received",
+  returning: "cvs-returning",
+  flowValue: "cvs-flowValue",
+  flowFrom: "cvs-flowFrom",
+  hidden: "cvs-hidden",
+  vars: "cvs-vars",
+  name: "cvs-name",
+  eq: "cvs-eq",
+  value: "cvs-value",
+  type: "cvs-type",
+  unknown: "cvs-unknown",
+  drawn: "cvs-drawn",
+  detail: "cvs-detail",
+  detailMeta: "cvs-detailMeta",
+  tree: "cvs-tree",
+  leaf: "cvs-leaf",
+  key: "cvs-key",
+  note: "cvs-note",
+  owner: "cvs-owner",
+  staticVars: "cvs-staticVars",
+} as const;
 
 type Props = {
   scope: ScopeView | null;
@@ -236,9 +283,9 @@ export function ScopeOverlay({ scope, mode, step, fontFamily }: Props) {
   return (
     <div ref={rootRef} className={styles.root} data-mode={mode} data-open={open} style={{ ["--cv-mono" as string]: fontFamily }}>
       {open && statics.length > 0 && (
-        <section className={styles.panel} aria-label="Static fields" style={mode === "docked" ? { maxHeight: "32%", overflowY: "auto", flexShrink: 0 } : undefined}>
+        <section className={styles.panel} aria-label={scope.language === "python" ? "Module globals" : "Static fields"} style={mode === "docked" ? { maxHeight: "32%", overflowY: "auto", flexShrink: 0 } : undefined}>
           <div className={styles.head}>
-            <h3 className={styles.heading}>Static fields</h3>
+            <h3 className={styles.heading}>{scope.language === "python" ? "Module globals" : "Static fields"}</h3>
           </div>
           {statics.map((g) => (
             <div key={g.owner}>

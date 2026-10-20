@@ -266,6 +266,8 @@ const VERTEX = /^(u|cur|current|node|vertex|from|src)$/;
 const NEIGHBOR = /^(v|next|neighbor|nbr|w|to)$/;
 /* Names that mean "adjacency or capacity matrix". Not "matrix": that is usually just a 2D array. */
 const MATRIX_GRAPH = /^(cap|capacity|capacities|adj|adjacency|graph)$/;
+/* Names that mean "a table of values", never an adjacency list, whatever its numbers look like. */
+const TABLE_NAMES = /^(dp|table|tab|tri|triangle|pascal|memo|cache|grid|matrix|mat|board|rows|cells|scores|result|res|ans)$/i;
 const FROM = ["from", "u", "src", "source"];
 const TO = ["to", "v", "dst", "dest", "target"];
 type Adj = { adj: { to: number; weight: number | null }[][]; directed: boolean; matrix: number[][] | null; edgeIds: Map<string, string> };
@@ -274,6 +276,16 @@ type Adj = { adj: { to: number; weight: number | null }[][]; directed: boolean; 
 function rows2d(heap: Record<string, HeapObj>, v: Val | undefined): { id: string; rows: number[][] } | null {
   if (!v || v.t !== "ref") return null;
   const o = heap[v.id as string];
+  /* Python: a list of lists of numbers (numpy 2-D arrays are recorded the same way). */
+  if (o && o.t === "list" && o.cls === "list") {
+    const rows: number[][] = [];
+    for (const it of o.items) {
+      const r = it.t === "ref" ? heap[it.id as string] : undefined;
+      if (!r || r.t !== "list" || r.cls !== "list" || !r.items.every((x) => typeof x.v === "number")) return null;
+      rows.push(r.items.map((x) => x.v as number));
+    }
+    return rows.length ? { id: v.id as string, rows } : null;
+  }
   if (!o || o.t !== "array" || !/\[\]$/.test(o.of) || !/^(int|long|short|byte|double|float|char)\[\]$/.test(o.of)) return null;
   const rows: number[][] = [];
   for (const it of o.items) {
@@ -319,6 +331,7 @@ function adjacency(heap: Record<string, HeapObj>, v: Val, name = ""): Adj | null
     return adj.some((r) => r.length) ? { adj, directed: true, matrix: m, edgeIds: new Map() } : null;
   }
   if (outer.t !== "list" || outer.items.length === 0) return null;
+  if (TABLE_NAMES.test(name)) return null;
   const first = outer.items[0].t === "ref" ? heap[outer.items[0].id as string] : undefined;
   if (first && first.t === "object") {
     /* An edge list: every item is an object with from and to fields. */
@@ -356,7 +369,12 @@ function adjacency(heap: Record<string, HeapObj>, v: Val, name = ""): Adj | null
     }
     adj.push(row);
   }
-  return adj.every((r) => r.every((e) => e.to >= 0 && e.to < adj.length)) ? { adj, directed: false, matrix: null, edgeIds: new Map() } : null;
+  if (!adj.every((r) => r.every((e) => e.to >= 0 && e.to < adj.length))) return null;
+  /* Plain numbers that list their own row, or the same neighbor twice, are a table (like [[0], [0, 0]]
+     or Pascal's [1, 1]), not neighbors. */
+  const plain = adj.every((r) => r.every((e) => e.weight === null));
+  if (plain && adj.some((r, i) => r.some((e) => e.to === i) || new Set(r.map((e) => e.to)).size !== r.length)) return null;
+  return { adj, directed: false, matrix: null, edgeIds: new Map() };
 }
 
 function graphDetector(name: string): Detector {

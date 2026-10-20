@@ -171,6 +171,66 @@ void = [x for x in st if x["kind"] == "return" and x["method"] == "main"]
 check("void returns are marked void", len(void) == 1 and void[0]["ret"] == {"t": "void"}, void[-1:] and void[-1].get("ret"))
 check("program output is unchanged", r["stdout"].strip() == "24 115 14 6", r["stdout"])
 
+section("inheritance across folders and packages")
+import pathlib as _pl
+_root = _pl.Path(__file__).resolve().parents[2] / "web/public/examples/inheritance"
+inherit_src = {("examples/inheritance/" + str(p.relative_to(_root))): p.read_text() for p in _root.rglob("*.java")}
+s, j = execute(inherit_src, mode="trace")
+r = j["result"]
+check("a multi-package inheritance project compiles and runs", j["status"] == "completed" and r["stdout"].splitlines()[:5] == ["Rex says Woof", "Rex says Woof", "Tom says Meow", "Max says Woof", "Max is trained to guide people"], (j["status"], r.get("stdout")))
+H = {c["name"]: c for c in r.get("hierarchy", [])}
+A = "examples.inheritance.animals."
+check("javac's class model names every class with its parent", H.get(A + "ServiceDog", {}).get("superclass") == A + "Dog" and H.get(A + "Dog", {}).get("superclass") == A + "Animal" and H.get(A + "ServiceDog", {}).get("interfaces") == [A + "Trained"], {k: v["superclass"] for k, v in H.items()})
+check("abstract classes and interfaces are marked", H[A + "Animal"]["abstract"] and H[A + "Trained"]["kind"] == "interface", (H[A + "Animal"]["abstract"], H[A + "Trained"]["kind"]))
+ov = {(c, m["name"]): m["overrides"] for c, v in H.items() for m in v["methods"]}
+check("overrides follow javac's rules, including across levels", ov[(A + "Dog", "sound")] == A + "Animal#sound" and ov[(A + "ServiceDog", "speak")] == A + "Animal#speak" and ov[(A + "ServiceDog", "command")] == A + "Trained#command", ov)
+check("members carry their file and line", H[A + "Dog"]["file"] == "examples/inheritance/animals/Dog.java" and next(m for m in H[A + "Dog"]["methods"] if m["name"] == "sound")["line"] == 8, H[A + "Dog"]["file"])
+st = r["trace"]["steps"]; heap = {}
+inherited = False; super_call = False
+for x in st:
+    if x.get("heap"): heap = x["heap"]
+    top = x["stack"][0]; self = top["locals"].get("this")
+    runtime = heap.get(self["id"], {}).get("cls") if self and self.get("t") == "ref" else None
+    if top["cls"] == A + "Animal" and top["method"] == "speak" and runtime == A + "Dog": inherited = True
+    if len(x["stack"]) > 1 and top["method"] == "speak" and top["cls"] == A + "Animal" and x["stack"][1]["cls"] == A + "ServiceDog" and x["stack"][1]["method"] == "speak" and x["stack"][1]["locals"]["this"]["id"] == self["id"]: super_call = True
+check("an inherited method runs in the parent's frame on the child's object", inherited)
+check("super.speak() is a parent frame on the same object, called from the override", super_call)
+sigs = {f.get("sig") for x in st for f in x["stack"] if f.get("sig")}
+check("frames carry JVM descriptors that match the class model", "(Ljava/lang/String;Ljava/lang/String;)V" in sigs and "()Ljava/lang/String;" in sigs, sorted(sigs))
+broken = dict(inherit_src); broken["examples/inheritance/animals/Dog.java"] = broken["examples/inheritance/animals/Dog.java"].replace("extends Animal", "extends Animale")
+s, j = execute(broken, mode="compile")
+check("a missing parent class is a compile error and no class model is sent", j["status"] == "compile_failed" and "hierarchy" not in j["result"] and any("Animale" in d["message"] for d in j["result"]["diagnostics"]), j["status"])
+
+section("dynamic programming: Pascal's triangle, three ways")
+_pdir = _pl.Path(__file__).resolve().parents[2] / "web/public/examples/pascaltriangle"
+pascal_src = {f"examples/pascaltriangle/{p.name}": p.read_text() for p in _pdir.glob("*.java")}
+_rows6 = ["[1]", "[1, 1]", "[1, 2, 1]", "[1, 3, 3, 1]", "[1, 4, 6, 4, 1]", "[1, 5, 10, 10, 5, 1]"]
+_P = "examples.pascaltriangle."
+s, j = execute(pascal_src, main=_P + "PascalTriangle", stdin="6\n")
+check("bottom-up builds the first six rows", j["status"] == "completed" and j["result"]["stdout"].strip().splitlines() == _rows6, j["result"].get("stdout"))
+s, j = execute(pascal_src, main=_P + "PascalTriangle", stdin="12\n")
+last = j["result"]["stdout"].strip().splitlines()[-1]
+check("twelve rows end with 1, 11, 55, ..., 11, 1", last == "[1, 11, 55, 165, 330, 462, 462, 330, 165, 55, 11, 1]", last)
+s, j = execute(pascal_src, main=_P + "PascalTriangle", stdin="0\n")
+check("an invalid row count says so and builds 6 rows", j["result"]["stdout"].startswith("Choose between 1 and 12 rows") and j["result"]["stdout"].strip().splitlines()[1:] == _rows6)
+s, j = execute(pascal_src, main=_P + "PascalTriangleMemoized", stdin="6\n")
+out = j["result"]["stdout"].strip().splitlines()
+check("memoized builds the same rows, with 41 calls and 12 cache answers", out[:6] == _rows6 and out[6] == "41 calls, 12 answered from the cache", out[-1])
+s, j = execute(pascal_src, main=_P + "PascalTriangleNaive", stdin="6\n")
+out = j["result"]["stdout"].strip().splitlines()
+check("plain recursion builds the same rows with 105 calls", out[:6] == _rows6 and out[6] == "105 calls without a cache", out[-1])
+for cls in ["PascalTriangle", "PascalTriangleMemoized", "PascalTriangleNaive"]:
+    s, j = execute(pascal_src, mode="trace", main=_P + cls, stdin="6\n")
+    t = j["result"]["trace"]
+    check(f"{cls} records completely ({t['stepCount']} steps)", j["status"] == "completed" and not t["truncated"], t.get("stopReason"))
+
+section("programs start in the project folder")
+_read = {"Main.java": 'import java.nio.file.*;\npublic class Main { public static void main(String[] a) throws Exception { System.out.println(Files.readString(Path.of("data/in.txt")).trim()); } }\n', "data/in.txt": "from a data file\n"}
+s, j = execute(_read)
+check("a Java program reads a project data file by relative path", j["status"] == "completed" and j["result"]["stdout"].strip() == "from a data file", j["result"].get("stderr", "")[-200:])
+s, j = execute(_read, mode="trace")
+check("  and so does the same program while it is recorded", j["status"] == "completed" and j["result"]["stdout"].strip() == "from a data file", j["result"].get("stderr", "")[-200:])
+
 section("exceptions and limits while tracing")
 s, j = execute({"Boom.java": 'public class Boom {\n  public static void main(String[] a) {\n    int[] x = new int[2];\n    for (int i = 0; i <= 2; i++) x[i] = i;\n  }\n}\n'}, mode="trace")
 ex = j["result"].get("exception") or {}

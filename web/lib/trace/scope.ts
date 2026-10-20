@@ -72,6 +72,8 @@ export type ScopeView = {
   statics: StaticGroup[];
   event: ScopeEvent | null;
   heap: Record<string, HeapObj>;
+  /** The language of the recording: Python shows module globals rather than static fields. */
+  language: "java" | "python";
 };
 
 export type ClassInfo = { fields: Record<string, string>; statics: Record<string, string>; super?: string };
@@ -87,6 +89,7 @@ export type ClassInfo = { fields: Record<string, string>; statics: Record<string
 export function normalizeTrace(trace: RawTrace): RawTrace {
   const types = new Map<string, Record<string, string>>();
   const args = new Map<string, string[]>();
+  const sigs = new Map<string, string>();
   const steps = trace.steps.map((s): RawStep => {
     const total = s.stackDepth ?? s.stack.length;
     const stack = s.stack.map((f, i): RawFrame => {
@@ -94,7 +97,8 @@ export function normalizeTrace(trace: RawTrace): RawTrace {
       const key = f.id !== undefined ? String(f.id) : `${depth}:${f.cls}.${f.method}`;
       if (f.types) types.set(key, f.types);
       if (f.args) args.set(key, f.args);
-      return { ...f, key, depth, types: types.get(key) ?? {}, args: args.get(key) ?? [] };
+      if (f.sig) sigs.set(key, f.sig);
+      return { ...f, key, depth, types: types.get(key) ?? {}, args: args.get(key) ?? [], sig: sigs.get(key) };
     });
     return { ...s, stack, stackDepth: total };
   });
@@ -108,10 +112,15 @@ const FLOATS = new Set(["float", "double", "Float", "Double"]);
 const INTEGERS = new Set(["long", "Long"]);
 
 const quote = (s: string) => JSON.stringify(s);
+/* Python shows values the way Python prints them: 'text', True, None. Set per recording. */
+let STYLE: "java" | "python" = "java";
+const pyQuote = (s: string) => (s.includes("'") && !s.includes('"') ? JSON.stringify(s) : `'${JSON.stringify(s).slice(1, -1).replace(/\\"/g, '"').replace(/'/g, "\\'")}'`);
 const charText = (c: string) => `'${c === "\n" ? "\\n" : c === "\t" ? "\\t" : c === "'" ? "\\'" : c === "\\" ? "\\\\" : c}'`;
 
 function primitive(v: Val): string {
   if (v.t === "String") return quote(String(v.v));
+  if (v.t === "str") return pyQuote(String(v.v));
+  if (v.t === "bool") return v.v ? "True" : "False";
   if (v.t === "char" || v.t === "Character") return charText(String(v.v));
   if (FLOATS.has(v.t)) {
     if (v.v === null || v.v === undefined) return "NaN or ∞";
@@ -140,7 +149,7 @@ function itemsOf(o: HeapObj): Val[] | null {
 
 /** A compact, Java-flavored rendering. depth limits how far nested references are spelled out. */
 export function summarize(v: Val, heap: Record<string, HeapObj>, depth = 0): string {
-  if (v.t === "null") return "null";
+  if (v.t === "null") return STYLE === "python" ? "None" : "null";
   if (v.t === "void") return "void";
   if (v.t !== "ref") return primitive(v);
   const o = heap[v.id as string];
@@ -150,26 +159,31 @@ export function summarize(v: Val, heap: Record<string, HeapObj>, depth = 0): str
     const name = simpleName(o.cls);
     if (depth > 0) return name;
     const fields = Object.entries(o.fields).slice(0, 3).map(([k, f]) => `${k}=${summarize(f, heap, depth + 1)}`);
-    return `${name}{${fields.join(", ")}${Object.keys(o.fields).length > 3 ? ", …" : ""}}`;
+    const more = Object.keys(o.fields).length > 3 ? ", …" : "";
+    /* Python objects read like their repr, Account(owner='ann'); Java ones like toString, Node{val=3}. */
+    return STYLE === "python" ? `${name}(${fields.join(", ")}${more})` : `${name}{${fields.join(", ")}${more}}`;
   }
   if (o.t === "map") {
     if (depth > 1) return `{${o.entries.length} entries}`;
-    const shown = o.entries.slice(0, 6).map(([k, x]) => `${summarize(k, heap, depth + 1)}=${summarize(x, heap, depth + 1)}`);
+    const sep = STYLE === "python" ? ": " : "=";
+    const shown = o.entries.slice(0, 6).map(([k, x]) => `${summarize(k, heap, depth + 1)}${sep}${summarize(x, heap, depth + 1)}`);
     return `{${shown.join(", ")}${o.entries.length > 6 ? ", …" : ""}}`;
   }
   const items = itemsOf(o) ?? [];
   const len = o.t === "array" ? o.len : items.length;
   if (depth > 1) return o.t === "array" ? `${formatType(o.of)}[${len}]` : `[${len} items]`;
-  const [open, close] = o.t === "set" ? ["{", "}"] : ["[", "]"];
+  const tuple = STYLE === "python" && o.t === "list" && o.cls === "tuple";
+  const [open, close] = o.t === "set" ? ["{", "}"] : tuple ? ["(", ")"] : ["[", "]"];
   const shown = items.slice(0, 8).map((x) => summarize(x, heap, depth + 1));
-  return `${open}${shown.join(", ")}${len > shown.length ? `, … ${len} total` : ""}${close}`;
+  /* A one-item tuple keeps its comma, as Python writes it: (5,). */
+  return `${open}${shown.join(", ")}${tuple && len === 1 ? "," : ""}${len > shown.length ? `, … ${len} total` : ""}${close}`;
 }
 
 export type InspectNode = { label: string; value: string; children?: InspectNode[]; note?: string };
 
 /** The full value, one level per click: indices, fields, entries, or a string's whole text. */
 export function inspect(v: Val, heap: Record<string, HeapObj>, depth = 0, seen: Set<string> = new Set()): InspectNode[] {
-  if (v.t === "String") {
+  if (v.t === "String" || v.t === "str") {
     const text = String(v.v);
     return [{ label: "length", value: text.endsWith("…") ? `${text.length - 1}+ (recorded up to 300 characters)` : String(text.length) }, { label: "text", value: quote(text) }];
   }
@@ -205,13 +219,14 @@ export function inspect(v: Val, heap: Record<string, HeapObj>, depth = 0, seen: 
 /** A method's name as it reads in source. */
 export function frameTitle(method: string, cls: string): string {
   if (method === "<init>") return `new ${simpleName(cls)}`;
+  if (method === "<module>") return cls === "__main__" ? "main module" : `module ${cls}`;
   if (method === "<clinit>") return `${simpleName(cls)} static setup`;
   const lambda = /^lambda\$(.+)\$\d+$/.exec(method);
   if (lambda) return `lambda in ${lambda[1]}`;
   return method;
 }
 
-type BuildOptions = { classes?: Record<string, ClassInfo> };
+type BuildOptions = { classes?: Record<string, ClassInfo>; language?: "java" | "python" };
 
 type Memory = {
   values: Map<string, { value: string; ref: string | null }>;
@@ -222,6 +237,7 @@ type Memory = {
 
 export function createScopeBuilder(opts: BuildOptions = {}) {
   const memory: Memory = { values: new Map(), order: new Map(), prev: null, prevFrames: new Map() };
+  const language = opts.language ?? "java";
   const staticType = (qualified: string) => {
     const cut = qualified.lastIndexOf(".");
     let cls: string | undefined = qualified.slice(0, cut);
@@ -237,6 +253,7 @@ export function createScopeBuilder(opts: BuildOptions = {}) {
 
   /** Call once per step, in order. drawn maps heap ids shown in the scene to their labels. */
   return function build(step: RawStep, heap: Record<string, HeapObj>, drawn?: Map<string, string>): ScopeView {
+    STYLE = language;
     const prev = memory.prev;
     const nextValues = new Map<string, { value: string; ref: string | null }>();
 
@@ -248,11 +265,12 @@ export function createScopeBuilder(opts: BuildOptions = {}) {
       const obj = ref ? heap[ref] : undefined;
       const { type, runtime } = describeType(declared, obj);
       const changed: ChangeKind = !before || before.value === value ? null : ref && before.ref === ref ? "contents" : "value";
-      const fullLength = v.t === "String" ? String(v.v).length + 2 : value.length;
+      const isText = v.t === "String" || v.t === "str";
+      const fullLength = isText ? String(v.v).length + 2 : value.length;
       return {
-        key, name, value: value.length > SHORT ? value.slice(0, SHORT - 1) + "…" : value, type: type ?? (v.t !== "ref" && v.t !== "null" ? v.t : null), runtime,
+        key, name, value: value.length > SHORT ? value.slice(0, SHORT - 1) + "…" : value, type: type ?? (v.t === "null" ? (STYLE === "python" ? "None" : null) : v.t !== "ref" ? v.t : null), runtime,
         changed, previous: changed ? before!.value : null, fresh: !before && !!prev, isArg, note: noteFor(v, heap), refId: ref,
-        expandable: fullLength > SHORT || (!!obj && obj.t !== "opaque") || (v.t === "String" && fullLength > 12),
+        expandable: fullLength > SHORT || (!!obj && obj.t !== "opaque") || (isText && fullLength > 12),
         drawnAs: ref ? drawn?.get(ref) ?? null : null,
         raw: v,
       };
@@ -261,14 +279,16 @@ export function createScopeBuilder(opts: BuildOptions = {}) {
     const frames: FrameView[] = step.stack.map((f, i) => {
       const key = f.key ?? `${i}`;
       const types = f.types ?? {};
-      const argNames = f.args ?? [];
-      const names = Object.keys(f.locals).filter((n) => n !== "this");
+      /* Python's self is the receiver, like Java's this: shown as the object, not as an argument. */
+      const selfName = f.locals.this ? "this" : language === "python" && f.args?.[0] === "self" && f.locals.self ? "self" : null;
+      const argNames = (f.args ?? []).filter((n) => n !== selfName);
+      const names = Object.keys(f.locals).filter((n) => n !== "this" && n !== selfName);
       const known = memory.order.get(key) ?? [];
       const order = [...known.filter((n) => names.includes(n)), ...names.filter((n) => !known.includes(n))];
       memory.order.set(key, [...known, ...names.filter((n) => !known.includes(n))]);
       const args = argNames.filter((n) => n in f.locals).map((n) => view(`${key}:${n}`, n, f.locals[n], types[n] ?? null, true));
       const locals = order.filter((n) => !argNames.includes(n)).map((n) => view(`${key}:${n}`, n, f.locals[n], types[n] ?? null, false));
-      const self = f.locals.this ? view(`${key}:this`, "this", f.locals.this, types.this ?? f.cls, false) : null;
+      const self = selfName ? view(`${key}:${selfName}`, selfName, f.locals[selfName], types[selfName] ?? f.cls, false) : null;
       const title = frameTitle(f.method, f.cls);
       const caller = step.stack[i + 1];
       return {
@@ -302,7 +322,7 @@ export function createScopeBuilder(opts: BuildOptions = {}) {
       list.push(view(`static:${qualified}`, qualified.slice(cut + 1), v, staticType(qualified), false));
       groups.set(owner, list);
     }
-    const statics = [...groups.entries()].map(([owner, vars]) => ({ owner: simpleName(owner), vars }));
+    const statics = [...groups.entries()].map(([owner, vars]) => ({ owner: owner === "__main__" ? "main module" : language === "python" ? owner : simpleName(owner), vars }));
 
     const top = frames[0];
     let event: ScopeEvent | null = null;
@@ -314,6 +334,6 @@ export function createScopeBuilder(opts: BuildOptions = {}) {
     memory.prev = step;
     memory.prevFrames = new Map(frames.map((fr) => [fr.key, fr]));
     const depth = step.stackDepth ?? frames.length;
-    return { frames, depth, hidden: Math.max(0, depth - frames.length), statics, event, heap };
+    return { frames, depth, hidden: Math.max(0, depth - frames.length), statics, event, heap, language };
   };
 }

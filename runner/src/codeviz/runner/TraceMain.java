@@ -370,6 +370,8 @@ public final class TraceMain {
           .raw(",\"line\":").raw(String.valueOf(fl.lineNumber()));
       /* Parameter names, once per invocation: the frame header shows the call's own arguments. */
       if (announced.add(ids[i])) {
+        /* The JVM descriptor tells overloads apart when matching a frame to the class model. */
+        w.raw(",\"sig\":").str(fl.method().signature());
         w.raw(",\"args\":[");
         try {
           List<LocalVariable> params = fl.method().arguments();

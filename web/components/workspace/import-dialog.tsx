@@ -3,9 +3,23 @@
 import { useRef, useState } from "react";
 import { previewImport, type ImportPreview } from "@/lib/workspace/zip";
 
-type Props = { existing: string[]; onImport: (files: { path: string; content: string }[]) => void; onClose: () => void };
+type Props = {
+  existing: { path: string; content: string }[];
+  /** replace lists the paths whose existing file the user chose to overwrite. */
+  onImport: (files: { path: string; content: string }[], replace: Set<string>) => void;
+  onClose: () => void;
+};
 
+/**
+ * Imported files join the project. A file identical to one already there is skipped; a different
+ * file at an existing path keeps the user's version unless they choose to replace it here.
+ */
 export function ImportDialog({ existing, onImport, onClose }: Props) {
+  const [replace, setReplace] = useState<Set<string>>(new Set());
+  const statusOf = (f: { path: string; content: string }) => {
+    const e = existing.find((x) => x.path === f.path);
+    return !e ? "new" : e.content === f.content ? "same" : "conflict";
+  };
   const input = useRef<HTMLInputElement>(null);
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [busy, setBusy] = useState(false);
@@ -18,7 +32,8 @@ export function ImportDialog({ existing, onImport, onClose }: Props) {
     setError(null);
     try {
       const uploads = await Promise.all([...list].map(async (f) => ({ name: f.name, data: await f.arrayBuffer() })));
-      setPreview(await previewImport(uploads, existing));
+      setPreview(await previewImport(uploads, existing.map((f) => f.path)));
+      setReplace(new Set());
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -48,12 +63,30 @@ export function ImportDialog({ existing, onImport, onClose }: Props) {
           <div className="mt-5 max-h-64 overflow-auto rounded-lg border border-white/10">
             {preview.files.length > 0 && (
               <ul className="divide-y divide-white/5">
-                {preview.files.map((f) => (
-                  <li key={f.path} className="flex items-center justify-between px-3 py-2 text-[13px]">
-                    <span className="text-zinc-200">{f.path}</span>
-                    <span className={existing.includes(f.path) ? "text-[#f2c94c]" : "text-zinc-600"}>{existing.includes(f.path) ? "replaces existing" : "new"}</span>
-                  </li>
-                ))}
+                {preview.files.map((f) => {
+                  const status = statusOf(f);
+                  return (
+                    <li key={f.path} className="flex items-center justify-between gap-3 px-3 py-2 text-[13px]">
+                      <span className="min-w-0 truncate text-zinc-200">{f.path}</span>
+                      {status === "new" && <span className="shrink-0 text-zinc-600">new</span>}
+                      {status === "same" && <span className="shrink-0 text-zinc-600">already in your project</span>}
+                      {status === "conflict" && (
+                        <label className="flex shrink-0 items-center gap-2 text-[12px] text-[#f2c94c]">
+                          <span>differs from yours</span>
+                          <select
+                            value={replace.has(f.path) ? "replace" : "keep"}
+                            onChange={(e) => setReplace((r) => { const n = new Set(r); if (e.target.value === "replace") n.add(f.path); else n.delete(f.path); return n; })}
+                            className="rounded-md border border-white/15 bg-black px-1.5 py-0.5 text-[12px] text-zinc-200"
+                            aria-label={`What to do with ${f.path}`}
+                          >
+                            <option value="keep">Keep mine</option>
+                            <option value="replace">Replace mine</option>
+                          </select>
+                        </label>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             )}
             {preview.skipped.length > 0 && (
@@ -71,11 +104,16 @@ export function ImportDialog({ existing, onImport, onClose }: Props) {
         <div className="mt-6 flex justify-end gap-2">
           <button onClick={onClose} className="rounded-full px-4 py-2 text-sm text-zinc-400 hover:text-zinc-100">Cancel</button>
           <button
-            disabled={!preview || preview.files.length === 0}
-            onClick={() => preview && onImport(preview.files)}
-            className="rounded-full bg-zinc-50 px-5 py-2 text-sm font-semibold text-black transition hover:bg-white disabled:opacity-30"
+            disabled={!preview || !preview.files.some((f) => statusOf(f) === "new" || replace.has(f.path))}
+            onClick={() => preview && onImport(preview.files, replace)}
+            className={`rounded-full px-5 py-2 text-sm font-semibold text-black transition disabled:opacity-30 ${replace.size ? "bg-[#ff5d73] hover:bg-[#ff7a8c]" : "bg-zinc-50 hover:bg-white"}`}
           >
-            {preview?.files.length ? `Import ${preview.files.length} file${preview.files.length === 1 ? "" : "s"}` : "Import"}
+            {(() => {
+              const n = preview?.files.filter((f) => statusOf(f) === "new").length ?? 0;
+              if (!preview) return "Import";
+              if (!n && !replace.size) return "Nothing new to import";
+              return `Import ${n} new${replace.size ? `, replace ${replace.size}` : ""}`;
+            })()}
           </button>
         </div>
       </div>

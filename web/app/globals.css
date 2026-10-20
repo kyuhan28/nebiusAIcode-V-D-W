@@ -128,3 +128,42 @@
     @apply font-sans;
   }
 }
+/* Workspace surfaces: plain black, like the page behind them. */
+.cv-glass-header,
+.cv-glass-side,
+.cv-glass-panel,
+.cv-glass-editor { background: #000; }
+/* Under the visualizations; kept as a hook, with nothing to dim on a black page. */
+.cv-scene-scrim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+/*
+ * The white grid floor for views without a 3D scene (call stack stage, inheritance diagram),
+ * matching the 3D grid: subtle major lines, barely-there minor ones, fading toward the edges.
+ */
+.cv-grid-space {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.cv-grid-floor {
+  position: absolute;
+  left: -60%;
+  right: -60%;
+  top: 44%;
+  height: 130%;
+  transform-origin: 50% 0;
+  transform: perspective(420px) rotateX(64deg);
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.2) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.2) 1px, transparent 1px),
+    linear-gradient(rgba(255, 255, 255, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.06) 1px, transparent 1px);
+  background-size: 160px 160px, 160px 160px, 32px 32px, 32px 32px;
+  background-position: center top;
+  mask-image: radial-gradient(ellipse 48% 64% at 50% 46%, #000 0%, rgba(0, 0, 0, 0.6) 50%, transparent 84%);
+  -webkit-mask-image: radial-gradient(ellipse 48% 64% at 50% 46%, #000 0%, rgba(0, 0, 0, 0.6) 50%, transparent 84%);
+}

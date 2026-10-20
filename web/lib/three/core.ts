@@ -128,32 +128,6 @@ export function disposeObject(root: THREE.Object3D) {
   materials.forEach((m) => m.dispose());
 }
 
-/**
- * The workspace backdrop: near-black overhead, lifting to deep graphite at the horizon, so the
- * grid floor has somewhere to recede to. Drawn as the scene background, behind everything.
- */
-export function createSpaceBackdrop() {
-  const canvas = document.createElement("canvas");
-  canvas.width = 2;
-  canvas.height = 256;
-  const g = canvas.getContext("2d")!;
-  const gradient = g.createLinearGradient(0, 0, 0, 256);
-  /* Brighter than it looks: tone mapping takes these down to a barely-there lift at the horizon. */
-  gradient.addColorStop(0, "#000000");
-  gradient.addColorStop(0.5, "#05080d");
-  gradient.addColorStop(0.68, "#0e1520");
-  gradient.addColorStop(0.85, "#070b11");
-  gradient.addColorStop(1, "#020304");
-  g.fillStyle = gradient;
-  g.fillRect(0, 0, 2, 256);
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  return texture;
-}
-
-/** How the workspace scenes set up their space: backdrop, sparse dim stars, and the quiet floor grid. */
-export const WORKSPACE_STARS = { count: 220, look: { size: 0.11, opacity: 0.32 } };
-
 export function prefersReducedMotion() {
   return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }

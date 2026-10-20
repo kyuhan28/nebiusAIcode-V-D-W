@@ -67,6 +67,31 @@ public final class Server {
   }
 
   /** The runner's install directory: RUNNER_HOME, or the nearest parent of the classes that holds bin/. */
+  /**
+   * Job folders are removed when their job ends; a runner that is killed mid-job (or a machine that
+   * restarts) leaves them behind. Those are removed at startup. Only folders older than 10 minutes are
+   * touched, since every job ends well before that, so a second runner sharing the folder is safe.
+   */
+  static void cleanStaleJobs(Path workRoot) {
+    long cutoff = System.currentTimeMillis() - 10 * 60 * 1000;
+    int removed = 0;
+    try (var dirs = java.nio.file.Files.list(workRoot)) {
+      for (Path dir : dirs.toList()) {
+        if (!dir.getFileName().toString().matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")) continue;
+        try {
+          if (java.nio.file.Files.getLastModifiedTime(dir).toMillis() > cutoff) continue;
+          try (var walk = java.nio.file.Files.walk(dir)) {
+            for (Path p : walk.sorted(java.util.Comparator.reverseOrder()).toList()) java.nio.file.Files.deleteIfExists(p);
+          }
+          removed++;
+        } catch (Exception e) {
+          System.err.println("[runner] could not remove leftover job folder " + dir + ": " + e);
+        }
+      }
+    } catch (Exception ignored) {}
+    if (removed > 0) System.out.println("[runner] removed " + removed + " leftover job folder" + (removed == 1 ? "" : "s") + " from an earlier run");
+  }
+
   static Path runnerHome() throws Exception {
     String env = System.getenv("RUNNER_HOME");
     if (env != null && !env.isBlank()) return Path.of(env);
@@ -87,6 +112,9 @@ public final class Server {
         + " | Java " + Runtime.version() + " | "
         + (docker != null ? "isolation docker (" + (docker.ready ? "ready, image " + docker.image + ", Java " + docker.javaVersion : "UNAVAILABLE: " + docker.problem) + ")"
             : "sandbox " + sandbox.level() + (sandbox.level().equals("partial") ? " (network isolation unavailable on this host)" : "")));
+    cleanStaleJobs(cfg.workRoot());
+    if (docker == null) System.out.println("[runner] process mode: programs have no network and their own processes, but can read and write any file "
+        + "this user can (including web/.env.local). Use Docker mode (RUNNER_ISOLATION=docker) for code you did not write.");
   }
 
   /* ---------------- Routing ---------------- */
@@ -144,6 +172,9 @@ public final class Server {
     m.put("javaVendor", System.getProperty("java.vendor"));
     m.put("runtimeName", System.getProperty("java.runtime.name"));
     m.put("compilerAvailable", ToolProvider.getSystemJavaCompiler() != null);
+    String py = executor.pythonVersion();
+    m.put("python", py == null ? Map.of("available", false)
+        : Map.of("available", true, "version", py, "packages", executor.pythonInfo().getOrDefault("packages", Map.of())));
     Map<String, Object> sb = new LinkedHashMap<>();
     if (docker != null) {
       Map<String, Object> d = new LinkedHashMap<>();
@@ -194,7 +225,13 @@ public final class Server {
     }
     String mode = body.get("mode") instanceof String s ? s : "run";
     if (!MODES.contains(mode)) { error(ex, 400, "bad_mode", "mode must be compile, run, trace, or test."); return; }
-    if (cfg.requireSandbox() && mode.equals("trace") && !sandbox.traceIsolated()) {
+    /* Python programs are .py files; its recorder runs inside the program, so it needs no loopback network. */
+    String language = body.get("language") instanceof String l ? l
+        : body.get("mainClass") instanceof String mc && mc.endsWith(".py") ? "python"
+        : body.get("mainClass") instanceof String mc && mc.endsWith(".c") ? "c"
+        : body.get("mainClass") instanceof String mc && mc.matches(".*\\.(cpp|cc|cxx)$") ? "cpp" : "java";
+    if (!Set.of("java", "python", "c", "cpp").contains(language)) { error(ex, 400, "bad_language", "language must be java, python, c, or cpp."); return; }
+    if (cfg.requireSandbox() && mode.equals("trace") && language.equals("java") && !sandbox.traceIsolated()) {
       error(ex, 503, "sandbox_unavailable", "Tracing needs network isolation, which this host cannot provide.");
       return;
     }
@@ -222,7 +259,7 @@ public final class Server {
         if (total > 512 * 1024) throw new RunnerException(413, "tests_too_large", "Test inputs are limited to 512 KB in total.");
         tests = list;
       }
-      req = new Executor.Request(mode, files, body.get("mainClass") instanceof String s ? s : null, stdin, tests);
+      req = new Executor.Request(mode, files, body.get("mainClass") instanceof String s ? s : null, stdin, tests, language);
     } catch (RunnerException e) {
       error(ex, e.status, e.code, e.getMessage());
       return;

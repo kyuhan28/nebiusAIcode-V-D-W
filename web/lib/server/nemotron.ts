@@ -29,10 +29,37 @@ const LIMITS = { file: 100_000, field: 20_000, instruction: 4_000, total: 160_00
 /* Modes that may propose a replacement file; explanations never do. */
 const CHANGES_CODE = new Set<AssistMode>(["find_bug", "implement_method", "suggest_fix", "explain_compiler_error", "ask"]);
 
+/**
+ * Nemotron models tried in order when one is not available to the API key (NVIDIA answers 404).
+ * NVIDIA_NEMOTRON_MODEL, when set, always goes first, then NVIDIA_NEMOTRON_FALLBACK_MODELS
+ * (comma-separated), then these. The first model that answers is remembered for this server.
+ */
+export const FALLBACK_MODELS = [
+  "nvidia/nemotron-3-super-120b-a12b",
+  "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+  "nvidia/nvidia-nemotron-nano-9b-v2",
+  "nvidia/llama-3.1-nemotron-ultra-253b-v1",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+];
+let workingModel: string | null = null;
+
+/** For tests: forget which model answered. */
+export function resetModelChoice() {
+  workingModel = null;
+  catalog = null;
+}
+
+function candidateModels(): string[] {
+  const listed = (process.env.NVIDIA_NEMOTRON_FALLBACK_MODELS ?? "").split(",").map((m) => m.trim()).filter(Boolean);
+  return [...new Set([process.env.NVIDIA_NEMOTRON_MODEL?.trim() || "", ...listed, ...FALLBACK_MODELS].filter(Boolean))];
+}
+
 export function config() {
+  const models = candidateModels();
   return {
     key: process.env.NVIDIA_NEMOTRON_API_KEY ?? "",
-    model: process.env.NVIDIA_NEMOTRON_MODEL || "nvidia/nemotron-3-super-120b-a12b",
+    model: workingModel ?? models[0],
+    models,
     base: (process.env.NVIDIA_API_BASE_URL || "https://integrate.api.nvidia.com/v1").replace(/\/+$/, ""),
     timeoutMs: Number(process.env.NVIDIA_NEMOTRON_TIMEOUT_MS || 90_000),
   };
@@ -128,26 +155,84 @@ export function extractSuggestion(text: string, mode: AssistMode, path: string |
   return full ? { code: full.replace(/\s+$/, "") + "\n", path } : null;
 }
 
+/** True when NVIDIA's answer means this model can't be used (retired, not available, unknown), not a passing failure. */
+async function modelUnusable(res: Response): Promise<boolean> {
+  if (res.status === 404 || res.status === 410) return true;
+  if (res.status !== 400 && res.status !== 422) return false;
+  const text = await res.clone().text().catch(() => "");
+  return /(model|function)/i.test(text) && /(not found|does not exist|deprecat|no longer|retired|unknown|not available|unavailable|end of life|EOL)/i.test(text);
+}
+
+let catalog: { at: number; models: string[] } | null = null;
+
+/** Nemotron chat models in NVIDIA's catalog right now, best first; asked at most once an hour. */
+async function catalogModels(cfg: ReturnType<typeof config>, fetchImpl: typeof fetch): Promise<string[]> {
+  if (catalog && Date.now() - catalog.at < 3_600_000) return catalog.models;
+  let models: string[] = [];
+  try {
+    const res = await fetchImpl(`${cfg.base}/models`, { headers: { Accept: "application/json", Authorization: `Bearer ${cfg.key}` }, signal: AbortSignal.timeout(15_000) });
+    const data = res.ok ? ((await res.json()) as { data?: { id?: unknown }[] }) : null;
+    const rank = (id: string) => (/super/i.test(id) ? 0 : /ultra/i.test(id) ? 1 : /nano/i.test(id) ? 2 : 3);
+    models = (data?.data ?? [])
+      .map((m) => (typeof m.id === "string" ? m.id : ""))
+      .filter((id) => /nemotron/i.test(id) && !/embed|rerank|reward|guard|safety|retriever|parse|ocr|clip|asr|tts|vl\b|vision/i.test(id))
+      .sort((a, b) => rank(a) - rank(b) || b.localeCompare(a));
+  } catch {
+    models = [];
+  }
+  catalog = { at: Date.now(), models };
+  return models;
+}
+
+/** For tests: forget the catalog. */
+export function resetCatalog() {
+  catalog = null;
+}
+
 export async function assist(r: AssistRequest, fetchImpl: typeof fetch = fetch): Promise<AssistResponse | AssistError> {
   const cfg = config();
   if (!cfg.key) return { status: 503, code: "not_configured", message: "Nemotron isn't set up yet. Add NVIDIA_NEMOTRON_API_KEY to web/.env.local and restart the web app." };
-  let res: Response;
-  try {
-    res = await fetchImpl(`${cfg.base}/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: `Bearer ${cfg.key}` },
-      body: JSON.stringify({ model: cfg.model, messages: buildMessages(r), temperature: 0.2, top_p: 0.95, max_tokens: 4096, stream: false }),
-      signal: AbortSignal.timeout(cfg.timeoutMs),
-    });
-  } catch (e) {
-    const timeout = (e as Error).name === "TimeoutError" || (e as Error).name === "AbortError";
-    return timeout
-      ? { status: 504, code: "timeout", message: "Nemotron took too long to answer. Try again, or ask about a smaller piece of code." }
-      : { status: 502, code: "unreachable", message: "The server couldn't reach NVIDIA's API. Check the server's internet connection." };
+  /*
+   * The model that answered last time first, then the configured ones, then (once) whatever Nemotron
+   * chat models NVIDIA's catalog lists right now. A model that is retired (410), not available to
+   * this key (404), or rejected as unknown is skipped; any other answer ends the search.
+   */
+  const queue = [cfg.model, ...cfg.models.filter((m) => m !== cfg.model)];
+  const tried = new Set<string>();
+  const messages = buildMessages(r);
+  const unavailable: string[] = [];
+  let res: Response | null = null;
+  let model = queue[0];
+  let askedCatalog = false;
+  while (queue.length) {
+    model = queue.shift()!;
+    if (tried.has(model)) continue;
+    tried.add(model);
+    try {
+      res = await fetchImpl(`${cfg.base}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: `Bearer ${cfg.key}` },
+        body: JSON.stringify({ model, messages, temperature: 0.2, top_p: 0.95, max_tokens: 4096, stream: false }),
+        signal: AbortSignal.timeout(cfg.timeoutMs),
+      });
+    } catch (e) {
+      const timeout = (e as Error).name === "TimeoutError" || (e as Error).name === "AbortError";
+      return timeout
+        ? { status: 504, code: "timeout", message: "Nemotron took too long to answer. Try again, or ask about a smaller piece of code." }
+        : { status: 502, code: "unreachable", message: "The server couldn't reach NVIDIA's API. Check the server's internet connection." };
+    }
+    if (!(await modelUnusable(res))) break;
+    unavailable.push(`${model} (${res.status === 410 ? "retired" : "not available"})`);
+    if (workingModel === model) workingModel = null;
+    if (!queue.length && !askedCatalog) {
+      askedCatalog = true;
+      queue.push(...(await catalogModels(cfg, fetchImpl)).filter((m) => !tried.has(m)).slice(0, 8));
+    }
   }
+  if (!res) return { status: 502, code: "model_unavailable", message: "No Nemotron model is configured." };
   if (!res.ok) {
     if (res.status === 401 || res.status === 403) return { status: 502, code: "auth_failed", message: "NVIDIA rejected the API key. Check NVIDIA_NEMOTRON_API_KEY in web/.env.local." };
-    if (res.status === 404) return { status: 502, code: "model_unavailable", message: `The model ${cfg.model} isn't available to this key. Set NVIDIA_NEMOTRON_MODEL to a model from your build.nvidia.com catalog.` };
+    if (await modelUnusable(res)) return { status: 502, code: "model_unavailable", message: `No Nemotron model worked with this key. Tried: ${unavailable.join(", ")}. Open build.nvidia.com, pick a chat model your key can use, and set NVIDIA_NEMOTRON_MODEL to its id in web/.env.local, then restart the web app.` };
     if (res.status === 429) {
       const wait = res.headers.get("retry-after");
       return { status: 429, code: "rate_limited", message: `NVIDIA's rate limit was reached.${wait ? ` Try again in ${wait} seconds.` : " Wait a moment and try again."}` };
@@ -159,5 +244,6 @@ export async function assist(r: AssistRequest, fetchImpl: typeof fetch = fetch):
   const raw = data?.choices?.[0]?.message?.content;
   if (typeof raw !== "string" || !stripReasoning(raw)) return { status: 502, code: "empty_response", message: "Nemotron returned an empty answer. Try rephrasing." };
   const text = stripReasoning(raw);
-  return { text, suggestion: extractSuggestion(text, r.mode, r.file?.path), model: cfg.model };
+  workingModel = model;
+  return { text, suggestion: extractSuggestion(text, r.mode, r.file?.path), model };
 }

@@ -7,6 +7,8 @@ import { Compartment, EditorSelection, EditorState, StateEffect, StateField } fr
 import { indentLess, indentMore } from "@codemirror/commands";
 import { HighlightStyle, indentUnit, syntaxHighlighting } from "@codemirror/language";
 import { java } from "@codemirror/lang-java";
+import { python } from "@codemirror/lang-python";
+import { cpp } from "@codemirror/lang-cpp";
 import { lintGutter, setDiagnostics, type Diagnostic as CmDiagnostic } from "@codemirror/lint";
 import { tags as t } from "@lezer/highlight";
 
@@ -22,6 +24,8 @@ type Props = {
   fontFamily: string;
   /** The selected text, so the code writer can focus on it. */
   onSelection?: (text: string) => void;
+  /** Put the cursor on this line and scroll to it, e.g. a method picked in the Inheritance view. */
+  reveal?: { line: number; nonce: number } | null;
 };
 
 /* The line the recorded execution is on. */
@@ -102,7 +106,7 @@ const tabKeys = keymap.of([
   },
 ]);
 
-export function CodeEditor({ path, value, onChange, activeLine, markers, fontSize, fontFamily, onSelection }: Props) {
+export function CodeEditor({ path, value, onChange, activeLine, markers, fontSize, fontFamily, onSelection, reveal }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const states = useRef(new Map<string, EditorState>());
@@ -120,7 +124,8 @@ export function CodeEditor({ path, value, onChange, activeLine, markers, fontSiz
         tabKeys,
         indentUnit.of(TAB),
         basicSetup,
-        java(),
+        /* Highlighting follows the file: Python, Java, C and C++, or plain text for data files. */
+        p.endsWith(".py") ? python() : p.endsWith(".java") ? java() : /\.(c|h|cpp|cc|cxx|hpp|hh|hxx)$/.test(p) ? cpp() : [],
         syntaxHighlighting(highlight),
         theme,
         sizing.of(sizeTheme(latest.current.fontSize)),
@@ -175,6 +180,15 @@ export function CodeEditor({ path, value, onChange, activeLine, markers, fontSiz
   useEffect(() => {
     view.current?.dispatch({ effects: sizing.reconfigure(sizeTheme(fontSize)) });
   }, [fontSize]);
+
+  /* Runs after the document switch above, so the line exists in the file just opened. */
+  useEffect(() => {
+    const v = view.current;
+    if (!v || !reveal || reveal.line > v.state.doc.lines) return;
+    const at = v.state.doc.line(reveal.line).from;
+    v.dispatch({ selection: { anchor: at }, effects: EditorView.scrollIntoView(at, { y: "center" }) });
+    v.focus();
+  }, [reveal?.nonce, path]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const v = view.current;

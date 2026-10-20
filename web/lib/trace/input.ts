@@ -116,7 +116,8 @@ export function replayInput(trace: { io?: IoEvent[]; ioTruncated?: boolean; stdi
       ops.push({ ...base, kind: "config", range: null, cursorAfter: cursor, verified: !!re, note: re ? `From now on, tokens are separated by ${JSON.stringify(e.args[0])} instead of whitespace.` : "This delimiter can't be replayed here, so later positions are unavailable." });
       return;
     }
-    if ((e.cls === "java.util.Scanner" && (e.op === "nextLine" || e.op === "hasNextLine")) || (e.cls === "java.io.BufferedReader" && e.op === "readLine")) {
+    /* Python's input() reads one line, like readLine(). */
+    if ((e.cls === "java.util.Scanner" && (e.op === "nextLine" || e.op === "hasNextLine")) || (e.cls === "java.io.BufferedReader" && e.op === "readLine") || (e.cls === "builtins" && e.op === "input")) {
       const peek = e.op === "hasNextLine";
       const start = cursor;
       const nl = stdin.indexOf("\n", start);
