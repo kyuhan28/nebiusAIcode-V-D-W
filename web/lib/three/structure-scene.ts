@@ -1,8 +1,9 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { CSS2DObject, CSS2DRenderer } from "three/examples/jsm/renderers/CSS2DRenderer.js";
-import { addEnvironment, createComposer, createRenderer, createStars, disposeObject } from "./core";
-import { createInfiniteGrid } from "./journey/grid";
+import { WORKSPACE_STARS, addEnvironment, createComposer, createRenderer, createSpaceBackdrop, createStars, disposeObject } from "./core";
+import { WORKSPACE_GRID, createInfiniteGrid } from "./journey/grid";
+import { createIdentifierLabel } from "./identifier-label";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import { EdgeVisual, JOURNEY, NodeVisual, boxKit, edgeGeometry, nodeMaterial, sphereKit } from "./journey/visuals";
 import type { StructureView } from "../trace/structures";
@@ -267,12 +268,13 @@ export function createStructureScene(container: HTMLElement, fontFamily: string)
   container.appendChild(labels.domElement);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x000000);
+  const backdrop = createSpaceBackdrop();
+  scene.background = backdrop;
   scene.fog = new THREE.Fog(0x000000, 24, 80);
   const envMap = addEnvironment(renderer, scene);
   scene.environmentIntensity = 0.6;
-  scene.add(createStars(600, 17));
-  const grid = createInfiniteGrid(-4.2);
+  scene.add(createStars(WORKSPACE_STARS.count, 17, WORKSPACE_STARS.look));
+  const grid = createInfiniteGrid(-4.2, WORKSPACE_GRID);
   scene.add(grid.mesh);
 
   const spheres = sphereKit(0.44);
@@ -457,10 +459,10 @@ export function createStructureScene(container: HTMLElement, fontFamily: string)
   let kind: StructureView["kind"] | null = null;
   const pointers = new Map<string, { group: THREE.Group; target: THREE.Vector3 }>();
 
-    const titleTag = tag("", { font: `600 15px ${fontFamily}`, color: "#d7deec" });
+    /* The structure's floating identifier ("scores : Map<String, Integer>") and its loop badge. */
+    const titleTag = createIdentifierLabel(fontFamily);
     const badgeTag = tag("", { font: `500 13px ${fontFamily}`, color: "#9ee8ff" });
-    /* Anchor titles by their left edge: the label renderer centers labels on their point otherwise. */
-    titleTag.obj.center.set(0, 0.5);
+    /* Anchor by the left edge: the label renderer centers labels on their point otherwise. */
     badgeTag.obj.center.set(0, 0.5);
     root.add(titleTag.obj, badgeTag.obj);
 
@@ -473,7 +475,7 @@ export function createStructureScene(container: HTMLElement, fontFamily: string)
       pointers.forEach((p) => p.group.visible && box.expandByPoint(p.target.clone().add(new THREE.Vector3(0, 0.55, 0))));
       if (!box.isEmpty()) {
         box.expandByScalar(0.6);
-        if (title && withTitle) box.max.y += badgeTag.el.style.display === "none" ? 1.4 : 2.0;
+        if (title && withTitle) box.max.y += badgeTag.obj.visible ? 2.0 : 1.4;
       }
       return box;
     }
@@ -593,13 +595,13 @@ export function createStructureScene(container: HTMLElement, fontFamily: string)
       pointers.forEach((m, name) => (m.group.visible = used.has(name)));
       /* Title and loop badge above the layer's top-left corner. */
       const box = localBounds(false);
-      titleTag.el.textContent = title;
+      titleTag.set(title);
       badgeTag.el.textContent = view.badge ?? "";
-      badgeTag.el.style.display = view.badge ? "" : "none";
-      titleTag.el.style.display = title ? "" : "none";
+      badgeTag.obj.visible = !!view.badge;
       const top = Number.isFinite(box.max.y) ? box.max.y : 0;
       const left = Number.isFinite(box.min.x) ? box.min.x : 0;
-      titleTag.obj.position.set(left, top + (view.badge ? 1.55 : 1.05), 0);
+      /* The label's bottom-left corner sits just above the structure (and its badge, when looping). */
+      titleTag.obj.position.set(left, top + (view.badge ? 1.3 : 0.75), 0);
       badgeTag.obj.position.set(left, top + 0.95, 0);
       /* Reframe when the shape changes: a new tube or board, or a different number of nodes. */
       if (view.kind === "stack" || view.kind === "queue" || view.kind === "grid") return rebuilt;
@@ -714,8 +716,8 @@ export function createStructureScene(container: HTMLElement, fontFamily: string)
     if ([...layers.values()].some((l, i) => !before[i] || l.offset.distanceTo(before[i]) > 0.5)) reframe = true;
     if (reframe) fit();
   }
-  function setView(view: StructureView | null) {
-    setViews(view ? [{ key: "main", view }] : []);
+  function setView(view: StructureView | null, title = "") {
+    setViews(view ? [{ key: "main", title, view }] : []);
   }
 
   const fit = () => {
@@ -772,6 +774,7 @@ export function createStructureScene(container: HTMLElement, fontFamily: string)
       controls.dispose();
       disposeObject(scene);
       envMap.dispose();
+      backdrop.dispose();
       composer.dispose();
       renderer.dispose();
       renderer.domElement.remove();

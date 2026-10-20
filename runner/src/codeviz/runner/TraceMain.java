@@ -24,6 +24,7 @@ import com.sun.jdi.StringReference;
 import com.sun.jdi.ThreadReference;
 import com.sun.jdi.Value;
 import com.sun.jdi.VirtualMachine;
+import com.sun.jdi.VoidValue;
 import com.sun.jdi.connect.AttachingConnector;
 import com.sun.jdi.connect.Connector;
 import com.sun.jdi.event.BreakpointEvent;
@@ -32,6 +33,7 @@ import com.sun.jdi.event.Event;
 import com.sun.jdi.event.EventSet;
 import com.sun.jdi.event.ExceptionEvent;
 import com.sun.jdi.event.LocatableEvent;
+import com.sun.jdi.event.MethodExitEvent;
 import com.sun.jdi.event.VMDeathEvent;
 import com.sun.jdi.event.VMDisconnectEvent;
 import com.sun.jdi.request.BreakpointRequest;
@@ -39,6 +41,7 @@ import com.sun.jdi.request.ClassPrepareRequest;
 import com.sun.jdi.request.EventRequest;
 import com.sun.jdi.request.EventRequestManager;
 import com.sun.jdi.request.ExceptionRequest;
+import com.sun.jdi.request.MethodExitRequest;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -47,6 +50,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -81,6 +85,22 @@ public final class TraceMain {
   private final StringBuilder stdout = new StringBuilder();
   private final int maxOutput;
   private boolean stdoutTruncated;
+
+  /**
+   * Frame identity. JDI stack frames are only valid while a thread is suspended, so every active
+   * user-code invocation gets its own id here, bottom (outermost) first, one list per thread. A
+   * frame is pushed when a step first sees it and popped on its real method-exit event, so two
+   * calls of the same method (recursion, or one call after another) never share an id.
+   */
+  private record Active(long id, Method method) {}
+  private final Map<Long, List<Active>> shadows = new HashMap<>();
+  private long nextFrameId = 1;
+  /** Frames whose parameter names were already sent; and the last declared-type table sent per frame. */
+  private final Set<Long> announced = new HashSet<>();
+  private final Map<Long, String> lastTypes = new HashMap<>();
+  /** Declared field types of every prepared user class, sent once instead of with every object. */
+  private final Map<String, Object> classInfo = new LinkedHashMap<>();
+  private MethodExitRequest exitReq;
 
   private TraceMain(Set<String> userClasses, int maxSteps, int maxOutput) {
     this.userClasses = userClasses;
@@ -184,6 +204,7 @@ public final class TraceMain {
     res.put("io", io == null ? List.of() : io.events());
     res.put("ioTruncated", io != null && io.truncated());
     res.put("stdin", new String(stdin, StandardCharsets.UTF_8));
+    res.put("classes", classInfo);
     return res;
   }
 
@@ -214,18 +235,28 @@ public final class TraceMain {
     exReq.enable();
     io = new IoTracer(vm, erm, userClasses, () -> stepCount);
     io.install();
+    /* Real returns from user methods, with their values. JDK classes are filtered out by the agent. */
+    exitReq = erm.createMethodExitRequest();
+    for (String ex : EXCLUDE) exitReq.addClassExclusionFilter(ex);
+    exitReq.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD);
+    exitReq.enable();
     vm.resume();
 
     while (true) {
       EventSet set = vm.eventQueue().remove(500);
       if (set == null) continue;
-      for (Event ev : set) {
+      /* Events at one location can arrive together; a method's last line runs before it returns. */
+      List<Event> ordered = new ArrayList<>();
+      set.forEach(ordered::add);
+      ordered.sort((x, y) -> Boolean.compare(x instanceof MethodExitEvent, y instanceof MethodExitEvent));
+      for (Event ev : ordered) {
         if (ev instanceof VMDeathEvent || ev instanceof VMDisconnectEvent) return;
         if (io.handle(ev)) continue;
         if (ev instanceof ClassPrepareEvent cpe) {
           ReferenceType type = cpe.referenceType();
           if (!userClasses.contains(type.name())) continue;
           preparedTypes.add(type);
+          describeClass(type);
           for (Method m : type.methods()) {
             if (m.isAbstract() || m.isNative()) continue;
             try {
@@ -248,6 +279,8 @@ public final class TraceMain {
         } else if (ev instanceof ExceptionEvent ee) {
           describeException(ee);
           record(ee, "exception");
+        } else if (ev instanceof MethodExitEvent me && me.request() == exitReq) {
+          onExit(me);
         }
         if (stepCount >= maxSteps || steps.full()) {
           stopReason = steps.full() ? "trace_size" : "max_steps";
@@ -282,6 +315,10 @@ public final class TraceMain {
   /* ---------------- Snapshots ---------------- */
 
   private void record(LocatableEvent ev, String kind) throws Exception {
+    record(ev, kind, null);
+  }
+
+  private void record(LocatableEvent ev, String kind, Value returned) throws Exception {
     Location loc = ev.location();
     ThreadReference thread = ev.thread();
     List<StackFrame> frames = thread.frames();
@@ -309,37 +346,67 @@ public final class TraceMain {
       w.raw(",\"out\":").raw(String.valueOf(stdout.length()));
     }
 
+    /* Every user-code frame, innermost first, with the id of the invocation it belongs to. */
+    List<StackFrame> user = new ArrayList<>();
+    for (StackFrame f : frames) if (userClasses.contains(f.location().declaringType().name())) user.add(f);
+    long[] ids = frameIds(thread, user);
+    w.raw(",\"stackDepth\":").raw(String.valueOf(user.size()));
+    if (returned != null) {
+      w.raw(",\"ret\":");
+      if (returned instanceof VoidValue) w.raw("{\"t\":\"void\"}");
+      else value(w, returned, pending, queued);
+      w.raw(",\"retType\":").str(loc.method().returnTypeName());
+    }
+
     w.raw(",\"stack\":[");
-    int depth = 0;
-    boolean firstFrame = true;
-    for (StackFrame f : frames) {
+    for (int i = 0; i < user.size() && i < MAX_FRAMES; i++) {
+      StackFrame f = user.get(i);
       Location fl = f.location();
-      if (!userClasses.contains(fl.declaringType().name())) continue;
-      if (depth++ >= MAX_FRAMES) break;
-      if (!firstFrame) w.raw(",");
-      firstFrame = false;
-      w.raw("{\"cls\":").str(fl.declaringType().name())
+      if (i > 0) w.raw(",");
+      w.raw("{\"id\":").raw(String.valueOf(ids[i]))
+          .raw(",\"depth\":").raw(String.valueOf(user.size() - 1 - i))
+          .raw(",\"cls\":").str(fl.declaringType().name())
           .raw(",\"method\":").str(fl.method().name())
-          .raw(",\"line\":").raw(String.valueOf(fl.lineNumber()))
-          .raw(",\"locals\":{");
+          .raw(",\"line\":").raw(String.valueOf(fl.lineNumber()));
+      /* Parameter names, once per invocation: the frame header shows the call's own arguments. */
+      if (announced.add(ids[i])) {
+        w.raw(",\"args\":[");
+        try {
+          List<LocalVariable> params = fl.method().arguments();
+          for (int k = 0; k < params.size(); k++) w.raw(k > 0 ? "," : "").str(params.get(k).name());
+        } catch (AbsentInformationException ignored) {}
+        w.raw("]");
+      }
+      w.raw(",\"locals\":{");
       boolean firstVar = true;
+      Json.Writer types = new Json.Writer();
+      types.raw("{");
       ObjectReference self = f.thisObject();
       if (self != null) {
         w.str("this").raw(":");
         value(w, self, pending, queued);
+        types.str("this").raw(":").str(fl.declaringType().name());
         firstVar = false;
       }
       try {
         List<LocalVariable> vars = f.visibleVariables();
         Map<LocalVariable, Value> vals = f.getValues(vars);
         for (LocalVariable v : vars) {
-          if (!firstVar) w.raw(",");
+          if (!firstVar) { w.raw(","); types.raw(","); }
           firstVar = false;
           w.str(v.name()).raw(":");
           value(w, vals.get(v), pending, queued);
+          types.str(v.name()).raw(":").str(declaredType(v.typeName(), v.genericSignature()));
         }
       } catch (AbsentInformationException ignored) {}
-      w.raw("}}");
+      w.raw("}");
+      /* Declared types only when they differ from what was last sent for this frame. */
+      String table = types.raw("}").toString();
+      if (!table.equals(lastTypes.get(ids[i]))) {
+        w.raw(",\"types\":").raw(table);
+        lastTypes.put(ids[i], table);
+      }
+      w.raw("}");
     }
     w.raw("]");
 
@@ -389,6 +456,127 @@ public final class TraceMain {
     if (stepCount > 0) steps.raw(",");
     steps.raw(w.toString());
     stepCount++;
+  }
+
+  /* ---------------- Calls and returns ---------------- */
+
+  /**
+   * Matches the thread's user frames (innermost first) to invocation ids, bottom up. Frames that
+   * are still the same method keep their id; the first mismatch and everything above it is new.
+   * Returns are popped on their exit events, so a later call of the same method gets a new id.
+   */
+  private long[] frameIds(ThreadReference thread, List<StackFrame> userTopFirst) {
+    List<Active> shadow = shadows.computeIfAbsent(thread.uniqueID(), k -> new ArrayList<>());
+    int n = userTopFirst.size();
+    int keep = 0;
+    while (keep < shadow.size() && keep < n && shadow.get(keep).method().equals(userTopFirst.get(n - 1 - keep).location().method())) keep++;
+    while (shadow.size() > keep) forget(shadow.remove(shadow.size() - 1));
+    while (shadow.size() < n) shadow.add(new Active(nextFrameId++, userTopFirst.get(n - 1 - shadow.size()).location().method()));
+    long[] ids = new long[n];
+    for (int i = 0; i < n; i++) ids[i] = shadow.get(n - 1 - i).id();
+    return ids;
+  }
+
+  private void forget(Active a) {
+    lastTypes.remove(a.id());
+  }
+
+  /**
+   * A user method is returning: record a "return" step with the real value while its frame is
+   * still on the stack, then pop it. Constructors, static initializers, and compiler-generated
+   * methods (lambda bodies, bridges) are popped without a step of their own.
+   */
+  private void onExit(MethodExitEvent me) throws Exception {
+    Method m = me.method();
+    if (!userClasses.contains(m.declaringType().name())) return;
+    boolean visible = !m.isConstructor() && !m.isStaticInitializer() && !m.isSynthetic() && !m.isBridge();
+    if (visible) {
+      try {
+        record(me, "return", me.returnValue());
+      } catch (com.sun.jdi.VMDisconnectedException e) {
+        throw e;
+      } catch (Exception e) {
+        /* A return that cannot be read is skipped rather than ending the whole recording. */
+      }
+    }
+    List<Active> shadow = shadows.get(me.thread().uniqueID());
+    if (shadow != null && !shadow.isEmpty() && shadow.get(shadow.size() - 1).method().equals(m)) forget(shadow.remove(shadow.size() - 1));
+  }
+
+  /** Declared field types of a user class, recorded once when the class is prepared. */
+  private void describeClass(ReferenceType type) {
+    Map<String, Object> fields = new LinkedHashMap<>();
+    Map<String, Object> statics = new LinkedHashMap<>();
+    for (Field f : type.fields()) {
+      if (f.isSynthetic()) continue;
+      (f.isStatic() ? statics : fields).put(f.name(), declaredType(f.typeName(), f.genericSignature()));
+    }
+    Map<String, Object> info = new LinkedHashMap<>();
+    info.put("fields", fields);
+    info.put("statics", statics);
+    if (type instanceof ClassType ct && ct.superclass() != null && userClasses.contains(ct.superclass().name())) info.put("super", ct.superclass().name());
+    classInfo.put(type.name(), info);
+  }
+
+  /**
+   * A declared type in Java syntax, with generic arguments when the class file has them
+   * (java.util.Map<java.lang.String, java.lang.Integer>, int[][]). Falls back to the erased type.
+   */
+  static String declaredType(String erased, String generic) {
+    if (generic == null || generic.isEmpty()) return erased;
+    try {
+      int[] p = {0};
+      String t = signature(generic, p);
+      return p[0] == generic.length() ? t : erased;
+    } catch (RuntimeException e) {
+      return erased;
+    }
+  }
+
+  private static String signature(String s, int[] p) {
+    char c = s.charAt(p[0]++);
+    switch (c) {
+      case 'B': return "byte";
+      case 'C': return "char";
+      case 'D': return "double";
+      case 'F': return "float";
+      case 'I': return "int";
+      case 'J': return "long";
+      case 'S': return "short";
+      case 'Z': return "boolean";
+      case 'V': return "void";
+      case '[': return signature(s, p) + "[]";
+      case 'T': {
+        int end = s.indexOf(';', p[0]);
+        String name = s.substring(p[0], end);
+        p[0] = end + 1;
+        return name;
+      }
+      case 'L': {
+        StringBuilder b = new StringBuilder();
+        while (true) {
+          char d = s.charAt(p[0]);
+          if (d == ';') { p[0]++; return b.toString(); }
+          if (d == '<') {
+            p[0]++;
+            b.append('<');
+            for (boolean first = true; s.charAt(p[0]) != '>'; first = false) b.append(first ? "" : ", ").append(typeArgument(s, p));
+            p[0]++;
+            b.append('>');
+          } else if (d == '.') { p[0]++; b.append('$'); }
+          else { p[0]++; b.append(d == '/' ? '.' : d); }
+        }
+      }
+      default: throw new IllegalArgumentException("Unexpected signature character " + c);
+    }
+  }
+
+  private static String typeArgument(String s, int[] p) {
+    char c = s.charAt(p[0]);
+    if (c == '*') { p[0]++; return "?"; }
+    if (c == '+') { p[0]++; return "? extends " + signature(s, p); }
+    if (c == '-') { p[0]++; return "? super " + signature(s, p); }
+    return signature(s, p);
   }
 
   private static String sourcePath(Location loc) {

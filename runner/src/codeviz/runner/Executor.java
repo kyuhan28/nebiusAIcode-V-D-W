@@ -201,7 +201,8 @@ public final class Executor {
     String reason = (String) t.get("stopReason");
     res.put("exitCode", reason == null ? t.get("exitCode") : null);
     Map<String, Object> trace = new LinkedHashMap<>();
-    trace.put("version", 1);
+    /* Version 2 adds frame ids and depth, parameter names, declared types, and return steps. */
+    trace.put("version", 2);
     trace.put("steps", t.get("steps"));
     trace.put("stepCount", t.get("stepCount"));
     trace.put("truncated", t.get("truncated"));
@@ -211,6 +212,8 @@ public final class Executor {
     trace.put("io", t.getOrDefault("io", List.of()));
     trace.put("ioTruncated", t.getOrDefault("ioTruncated", false));
     trace.put("stdin", t.getOrDefault("stdin", ""));
+    /* Declared field and static types per user class, from the class files. */
+    trace.put("classes", t.getOrDefault("classes", Map.of()));
     res.put("trace", trace);
     if (t.get("exception") instanceof Map<?, ?> ex) res.put("exception", ex);
     if ("timeout".equals(reason)) { res.put("error", "Tracing stopped after " + cfg.traceTimeoutMs() / 1000 + " seconds. The steps recorded so far are shown."); finish(job, res, "timed_out"); }

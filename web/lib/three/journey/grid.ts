@@ -1,17 +1,38 @@
 import * as THREE from "three";
 
+export type GridLook = {
+  minor: string;
+  major: string;
+  cell: number;
+  /** Opacity of minor and major lines before distance fading. */
+  minorAlpha: number;
+  majorAlpha: number;
+};
+
+/** The landing page's floor. */
+export const JOURNEY_GRID: GridLook = { minor: "#1b1f28", major: "#2e3442", cell: 2, minorAlpha: 0.7, majorAlpha: 1 };
+/**
+ * The workspace floor: a quiet graphite grid with a faint cyan cast on the major lines, kept well
+ * below the brightness of labels and values so it reads as space, not content. Tuned for the
+ * output pass: ACES tone mapping crushes very dark colors to black, so these hex values sit a
+ * little above how dim they finally look (major lines land near rgb(7, 35, 51)).
+ */
+export const WORKSPACE_GRID: GridLook = { minor: "#222b38", major: "#1f4656", cell: 1.5, minorAlpha: 0.55, majorAlpha: 0.6 };
+
 /**
  * An endless-looking floor grid. Lines are computed in world space, so the plane can
  * follow the camera without the lines sliding, and they fade out with distance.
  */
-export function createInfiniteGrid(y: number) {
+export function createInfiniteGrid(y: number, look: GridLook = JOURNEY_GRID) {
   const material = new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: false,
     uniforms: {
-      uMinor: { value: new THREE.Color("#1b1f28") },
-      uMajor: { value: new THREE.Color("#2e3442") },
-      uCell: { value: 2 },
+      uMinor: { value: new THREE.Color(look.minor) },
+      uMajor: { value: new THREE.Color(look.major) },
+      uMinorAlpha: { value: look.minorAlpha },
+      uMajorAlpha: { value: look.majorAlpha },
+      uCell: { value: look.cell },
       uFade: { value: 90 },
       uCamera: { value: new THREE.Vector3() },
       uReveal: { value: 0 },
@@ -27,6 +48,8 @@ export function createInfiniteGrid(y: number) {
     fragmentShader: /* glsl */ `
       uniform vec3 uMinor;
       uniform vec3 uMajor;
+      uniform float uMinorAlpha;
+      uniform float uMajorAlpha;
       uniform float uCell;
       uniform float uFade;
       uniform vec3 uCamera;
@@ -45,7 +68,7 @@ export function createInfiniteGrid(y: number) {
         float fade = 1.0 - smoothstep(uFade * 0.2, uFade, dist);
         float reveal = smoothstep(0.0, 1.0, uReveal * 1.4 - dist / (uFade * 1.2));
         vec3 color = mix(uMinor, uMajor, major);
-        float alpha = max(minor * 0.7, major) * fade * reveal;
+        float alpha = max(minor * uMinorAlpha, major * uMajorAlpha) * fade * reveal;
         if (alpha < 0.002) discard;
         gl_FragColor = vec4(color, alpha);
       }

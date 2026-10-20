@@ -8,6 +8,8 @@ import { ImportDialog } from "./import-dialog";
 import { TerminalPanel, PHASE_LABEL, phaseTone, type Phase } from "./terminal-panel";
 import { TraceVisualizer } from "./trace-visualizer";
 import { StructureVisualizer } from "./structure-visualizer";
+import { ScopeOverlay } from "./scope-overlay";
+import { GridSpace } from "./grid-space";
 import { LibraryPanel } from "./library-panel";
 import { IoAssistant, type IoRun } from "./io-assistant";
 import { NemotronAssistant, type AssistContext, type AssistMode } from "./nemotron-assistant";
@@ -439,6 +441,9 @@ export function Workspace({ monoFont }: { monoFont: string }) {
 
   const sandbox = runtime?.sandbox.level;
   const showRight = layout !== "code";
+  /* Variables live in the scene: docked over a drawn structure, or the whole view when there is none. */
+  const sceneDrawn = !!interp && (interp.layers.length >= 2 || !!interp.structure || !!interp.array);
+  const scopeMode: "docked" | "stage" | null = !interp ? null : sceneDrawn ? "docked" : inputReplay ? null : "stage";
   const rightPct = layout === "visualize" ? 0.66 : rightWidth;
 
   return (
@@ -648,26 +653,31 @@ export function Workspace({ monoFont }: { monoFont: string }) {
                 {interp && interp.layers.length >= 2 ? (
                   <StructureVisualizer views={current?.layers ?? []} resetKey={resetKey} fontFamily={monoFont} className="absolute inset-0" />
                 ) : interp?.structure ? (
-                  <StructureVisualizer view={current?.structure ?? null} resetKey={resetKey} fontFamily={monoFont} className="absolute inset-0" />
+                  <StructureVisualizer view={current?.structure ?? null} title={interp.title} resetKey={resetKey} fontFamily={monoFont} className="absolute inset-0" />
                 ) : interp?.array ? (
                   <TraceVisualizer length={interp.array.length} view={current?.array ?? null} resetKey={resetKey} fontFamily={monoFont} className="absolute inset-0" />
                 ) : inputReplay ? (
                   <InputStream replay={inputReplay} step={step} onSeek={(s) => { setPlaying(false); setStep(s); }} fontFamily={monoFont} />
-                ) : (
-                  <div className="flex h-full flex-col items-center justify-center px-8 text-center">
-                    <p className="text-lg font-semibold tracking-tight text-zinc-200">{interp ? "Nothing to draw in this run" : "Watch your code run"}</p>
-                    <p className="mt-2 max-w-sm text-sm leading-relaxed text-zinc-500">
-                      {interp
-                        ? "This program has no array, list, tree, graph, or map to draw. Line-by-line playback, the call stack, variables, and output still work below."
-                        : "Visualize records your program's real execution, line by line, and draws the arrays, lists, trees, graphs, and maps it builds. Open an example to try it."}
+                ) : interp ? (
+                  <>
+                    <GridSpace />
+                    <p className="pointer-events-none absolute inset-x-0 bottom-3 z-10 px-6 text-center text-[12px] text-zinc-600">
+                      This run builds no array, list, tree, graph, or map, so its calls and variables are the picture.
                     </p>
-                    {!interp && (
-                      <button onClick={() => execute("trace")} disabled={busy} className="mt-5 rounded-full border border-[#6fe9ff]/35 px-4 py-1.5 text-sm text-[#9ee8ff] hover:bg-[#6fe9ff]/10 disabled:opacity-40">
-                        Visualize
-                      </button>
-                    )}
+                  </>
+                ) : (
+                  <div className="relative flex h-full flex-col items-center justify-center px-8 text-center">
+                    <GridSpace />
+                    <p className="relative text-lg font-semibold tracking-tight text-zinc-200">Watch your code run</p>
+                    <p className="relative mt-2 max-w-sm text-sm leading-relaxed text-zinc-500">
+                      Visualize records your program&apos;s real execution, line by line, and draws its variables, calls, and the arrays, lists, trees, graphs, and maps it builds. Open an example to try it.
+                    </p>
+                    <button onClick={() => execute("trace")} disabled={busy} className="relative mt-5 rounded-full border border-[#6fe9ff]/35 px-4 py-1.5 text-sm text-[#9ee8ff] hover:bg-[#6fe9ff]/10 disabled:opacity-40">
+                      Visualize
+                    </button>
                   </div>
                 )}
+                {scopeMode && <ScopeOverlay scope={current?.scope ?? null} mode={scopeMode} step={step} fontFamily={monoFont} />}
                 {(interp?.array || interp?.structure || (interp?.layers.length ?? 0) >= 2) && (
                   <button onClick={() => setResetKey((k) => k + 1)} className="absolute right-3 top-3 rounded-full border border-white/15 px-3 py-1 text-[12px] text-zinc-400 hover:text-zinc-100">Reset view</button>
                 )}
@@ -714,7 +724,7 @@ export function Workspace({ monoFont }: { monoFont: string }) {
                       <p className="truncate text-zinc-500" style={{ fontFamily: monoFont }}>
                         {current.frames.map((f) => `${f.method}():${f.line}`).join("  ‹  ")}
                       </p>
-                      {current.vars.length > 0 && (
+                      {!scopeMode && current.vars.length > 0 && (
                         <div className="flex flex-wrap gap-1.5 pt-1" style={{ fontFamily: monoFont }}>
                           {current.vars.map((v) => (
                             <span key={v.name} className={`rounded-md px-2 py-0.5 text-[12px] transition ${v.changed ? "bg-[#8f6bff]/20 text-zinc-50" : "bg-white/5 text-zinc-300"}`}>

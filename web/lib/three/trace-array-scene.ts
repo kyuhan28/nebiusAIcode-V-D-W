@@ -1,8 +1,10 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { CSS2DObject, CSS2DRenderer } from "three/examples/jsm/renderers/CSS2DRenderer.js";
-import { addEnvironment, createComposer, createRenderer, createStars, disposeObject } from "./core";
-import { createInfiniteGrid } from "./journey/grid";
+import { WORKSPACE_STARS, addEnvironment, createComposer, createRenderer, createSpaceBackdrop, createStars, disposeObject, prefersReducedMotion } from "./core";
+import { WORKSPACE_GRID, createInfiniteGrid } from "./journey/grid";
+import { createIdentifierLabel } from "./identifier-label";
+import { identifier } from "../trace/types";
 import { JOURNEY, NodeVisual, boxKit, type NodeState } from "./journey/visuals";
 import type { ArrayView } from "../trace/interpret";
 import { attachWasd } from "./wasd";
@@ -29,13 +31,15 @@ export function createTraceArrayScene(container: HTMLElement, length: number, fo
   container.appendChild(labels.domElement);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x000000);
+  const backdrop = createSpaceBackdrop();
+  scene.background = backdrop;
   scene.fog = new THREE.Fog(0x000000, 20, 70);
   const envMap = addEnvironment(renderer, scene);
   scene.environmentIntensity = 0.6;
-  scene.add(createStars(600, 13));
-  const grid = createInfiniteGrid(-1.8);
+  scene.add(createStars(WORKSPACE_STARS.count, 13, WORKSPACE_STARS.look));
+  const grid = createInfiniteGrid(-1.8, WORKSPACE_GRID);
   scene.add(grid.mesh);
+  const still = prefersReducedMotion();
 
   /* Long arrays and lists wrap into rows of 10, keeping index order, so every value stays readable. */
   const PER_ROW = length > 16 ? 10 : Math.max(length, 1);
@@ -44,11 +48,12 @@ export function createTraceArrayScene(container: HTMLElement, length: number, fo
   const slotX = (i: number) => ((i % PER_ROW) - (PER_ROW - 1) / 2) * (CELL + GAP);
   const slotY = (i: number) => ((ROWS - 1) / 2 - Math.floor(i / PER_ROW)) * ROW_H;
   const kit = boxKit(CELL, CELL, CELL, 0.14);
-  {
-    const count = label(`${length} element${length === 1 ? "" : "s"}`, { font: `500 14px ${fontFamily}`, color: "#6b7385" });
-    count.obj.position.set(slotX(0) - 0.2, slotY(0) + 1.75, 0);
-    scene.add(count.obj);
-  }
+  /* The variable's floating label, above the index markers' lane so a marker never hides it. */
+  const LABEL_Y = POINTER_Y + 0.95;
+  const name = createIdentifierLabel(fontFamily);
+  name.obj.position.set(slotX(0) - CELL / 2, slotY(0) + LABEL_Y, 0);
+  scene.add(name.obj);
+  let labelLift = 0;
   const cells = Array.from({ length }, (_, i) => {
     const v = new NodeVisual(kit, i + 7);
     v.glowScale = 0.8;
@@ -95,11 +100,11 @@ export function createTraceArrayScene(container: HTMLElement, length: number, fo
   const wasd = attachWasd(renderer.domElement, container, camera, controls);
   const resetView = () => {
     const halfW = (PER_ROW * (CELL + GAP)) / 2 + 1.2;
-    const halfH = (ROWS * ROW_H) / 2 + 1;
+    const halfH = (ROWS * ROW_H) / 2 + 1.9;
     const tanHalf = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
     const dist = Math.max(3 / tanHalf, halfH / tanHalf, halfW / (tanHalf * camera.aspect));
     camera.position.set(dist * 0.12, dist * 0.3, dist);
-    controls.target.set(0, 0.2, 0);
+    controls.target.set(0, 0.55, 0);
     controls.update();
   };
   const resize = () => {
@@ -122,6 +127,8 @@ export function createTraceArrayScene(container: HTMLElement, length: number, fo
   let lastSwap: string | null = null;
 
   function setState(view: ArrayView | null) {
+    const size = view ? `${view.type?.endsWith("]") ? "length" : "size"} ${view.values.length}` : "";
+    name.set(view ? identifier(view.name, view.type) : "", size, view?.aliases ?? []);
     cells.forEach((c, i) => {
       const value = view?.values[i];
       c.value.textContent = value === undefined || value === null ? "" : String(value);
@@ -160,6 +167,8 @@ export function createTraceArrayScene(container: HTMLElement, length: number, fo
     pointers.forEach((p, name) => {
       if (!used.has(name)) p.group.visible = false;
     });
+    /* Two markers on one cell stack upward; the label moves up with them. */
+    labelLift = Math.max(0, ...perCell.values()) > 1 ? (Math.max(...perCell.values()) - 1) * 0.85 : 0;
   }
 
   let frame = 0;
@@ -178,8 +187,9 @@ export function createTraceArrayScene(container: HTMLElement, length: number, fo
     });
     pointers.forEach((p) => {
       p.group.position.x += (p.targetX - p.group.position.x) * k;
-      p.group.position.y += (p.targetY + Math.sin(now / 320) * 0.04 - p.group.position.y) * k;
+      p.group.position.y += (p.targetY + (still ? 0 : Math.sin(now / 320) * 0.04) - p.group.position.y) * k;
     });
+    name.obj.position.y += (slotY(0) + LABEL_Y + labelLift - name.obj.position.y) * k;
     wasd.update(dt);
     controls.update();
     grid.update(camera, 1, 70);
@@ -199,6 +209,7 @@ export function createTraceArrayScene(container: HTMLElement, length: number, fo
       controls.dispose();
       disposeObject(scene);
       envMap.dispose();
+      backdrop.dispose();
       composer.dispose();
       renderer.dispose();
       renderer.domElement.remove();

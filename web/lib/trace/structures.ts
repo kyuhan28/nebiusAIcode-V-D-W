@@ -4,6 +4,8 @@
  * so what it draws is what the program actually built.
  */
 import type { HeapObj, RawStep, Val } from "./interpret";
+import type { ClassInfo } from "./scope";
+import { describeType, identifier } from "./types";
 
 export type NodeState = "idle" | "current" | "visited" | "queued" | "special" | "dim";
 export type EdgeState = "idle" | "trail" | "active" | "special";
@@ -39,7 +41,7 @@ export type StructureView = {
 };
 
 type Ctx = { step: RawStep; heap: Record<string, HeapObj>; line?: string };
-export type Detector = { kind: StructureView["kind"]; name?: string; view: (c: Ctx) => StructureView | null };
+export type Detector = { kind: StructureView["kind"]; name?: string; /** The user class a detector follows (tree or list nodes, a stack class). */ cls?: string; view: (c: Ctx) => StructureView | null };
 
 const isObj = (h: HeapObj | undefined, cls?: string): h is Extract<HeapObj, { t: "object" }> => !!h && h.t === "object" && (!cls || h.cls === cls);
 const num = (v: Val | undefined) => (v && typeof v.v === "number" ? (v.v as number) : null);
@@ -99,6 +101,7 @@ function pointersFor(step: RawStep, ids: Set<string>) {
 function treeDetector(cls: string, [leftName, rightName]: string[]): Detector {
   return {
     kind: "tree",
+    cls,
     view: ({ step, heap }) => {
       /* The root is the node nobody points to that the program still holds. */
       const children = new Set<string>();
@@ -144,6 +147,7 @@ function treeDetector(cls: string, [leftName, rightName]: string[]): Detector {
 function listDetector(cls: string, nextName: string): Detector {
   return {
     kind: "list",
+    cls,
     view: ({ step, heap }) => {
       const pointedTo = new Set<string>();
       for (const o of Object.values(heap)) if (isObj(o, cls) && o.fields[nextName]?.t === "ref") pointedTo.add(o.fields[nextName].id as string);
@@ -730,6 +734,7 @@ function seqDetector(kind: SeqKind, source: { cls: string } | { name: string }):
   return {
     kind,
     name: detectorName,
+    cls: "cls" in source ? source.cls : undefined,
     view: ({ step, heap }) => {
       let snap: Snapshot | null = null;
       if ("cls" in source) {
@@ -882,18 +887,28 @@ function arrayDetector(name: string, indexVars: Set<string> = new Set()): Detect
   };
 }
 
-const shortType = (h: HeapObj): string => (h.t === "array" ? `${h.of}[${h.items.length}]` : "cls" in h ? (h as { cls: string }).cls.split(/[.$]/).pop()! : (h as { t: string }).t);
-
 export type LayerDef = { key: string; name: string; title: string; detector: Detector };
 
-/** A panel title from the real runtime type: "scores · HashMap", "graph · ArrayList (adjacency list)". */
-export function titleFor(detector: Detector, steps: RawStep[], heaps: Record<string, HeapObj>[]): string {
+/** The declared type of a root found by roots(): a frame's local, or a static field (depth 99). */
+function declaredAt(step: RawStep, name: string, depth: number, classes?: Record<string, ClassInfo>): string | undefined {
+  if (depth !== 99) return step.stack[depth]?.types?.[name];
+  const q = Object.keys(step.statics ?? {}).find((k) => k.slice(k.lastIndexOf(".") + 1) === name);
+  return q ? classes?.[q.slice(0, q.lastIndexOf("."))]?.statics[name] : undefined;
+}
+
+/** "scores : Map<String, Integer>" from the declared type, or the runtime class when none was recorded. */
+function labelOf(step: RawStep, heap: Record<string, HeapObj>, name: string, v: Val, depth: number, classes?: Record<string, ClassInfo>) {
+  /* The declared type is what the variable is; the object's own class shows in the variable panel. */
+  return identifier(name, describeType(declaredAt(step, name, depth, classes), heap[v.id as string]).type);
+}
+
+/** A floating label for a structure: its variable and type, "graph : List<List<Integer>> (adjacency)". */
+export function titleFor(detector: Detector, steps: RawStep[], heaps: Record<string, HeapObj>[], classes?: Record<string, ClassInfo>): string {
   if (!detector.name) return detector.kind === "tree" ? "binary tree" : detector.kind === "list" ? "linked list" : detector.kind === "stack" ? "stack" : detector.kind === "queue" ? "queue" : detector.kind;
   for (let k = 0; k < steps.length; k++) {
     const found = roots(steps[k]).find(([nm, v]) => nm === detector.name && v.t === "ref" && heaps[k][v.id as string]);
     if (!found) continue;
-    const type = shortType(heaps[k][found[1].id as string]);
-    return `${detector.name} · ${type}${detector.kind === "graph" ? " (adjacency)" : detector.kind === "points" ? " (points)" : ""}`;
+    return `${labelOf(steps[k], heaps[k], found[0], found[1], found[2], classes)}${detector.kind === "graph" ? " (adjacency)" : detector.kind === "points" ? " (points)" : ""}`;
   }
   return detector.name;
 }
@@ -902,7 +917,7 @@ export function titleFor(detector: Detector, steps: RawStep[], heaps: Record<str
  * Every other data structure the program holds, so several can be drawn side by side: arrays,
  * lists, maps, sets, stacks, queues, linked lists, and 2D arrays, named by their variables.
  */
-export function detectExtraLayers(steps: RawStep[], heaps: Record<string, HeapObj>[], primary: Detector | null, sources: Record<string, string> = {}, limit = 4): LayerDef[] {
+export function detectExtraLayers(steps: RawStep[], heaps: Record<string, HeapObj>[], primary: Detector | null, sources: Record<string, string> = {}, limit = 4, classes?: Record<string, ClassInfo>): LayerDef[] {
   const skip = new Set(["args"]);
   if (primary?.name) skip.add(primary.name);
   if (primary?.kind === "graph") for (const n of ["dist", "distance", "distances", "d", "prev", "parent", "pred", "previous", "visited", "seen", "done", "settled", "level", "height", "heights", "h", "label", "excess", "overflow", "flow", "flows"]) skip.add(n);
@@ -911,7 +926,7 @@ export function detectExtraLayers(steps: RawStep[], heaps: Record<string, HeapOb
   const room = limit - (primary ? 1 : 0);
   steps.forEach((s, k) => {
     const heap = heaps[k];
-    const consider = (nm: string, v: Val) => {
+    const consider = (nm: string, v: Val, depth: number) => {
       if (out.length >= room || skip.has(nm) || names.has(nm) || v.t !== "ref" || ids.has(v.id as string)) return;
       const h = heap[v.id as string];
       if (!h) return;
@@ -926,11 +941,11 @@ export function detectExtraLayers(steps: RawStep[], heaps: Record<string, HeapOb
       if (!det) return;
       ids.add(v.id as string);
       names.add(nm);
-      out.push({ key: `v:${nm}`, name: nm, title: `${nm} · ${shortType(h)}`, detector: det });
+      out.push({ key: `v:${nm}`, name: nm, title: labelOf(s, heap, nm, v, depth, classes), detector: det });
     };
     /* Outermost frames first, so a structure is named after the variable that owns it. */
-    for (const f of [...s.stack].reverse()) for (const [nm, v] of Object.entries(f.locals)) consider(nm, v);
-    for (const [nm, v] of Object.entries(s.statics ?? {})) consider(nm.split(".").pop()!, v);
+    for (let depth = s.stack.length - 1; depth >= 0; depth--) for (const [nm, v] of Object.entries(s.stack[depth].locals)) consider(nm, v, depth);
+    for (const [nm, v] of Object.entries(s.statics ?? {})) consider(nm.split(".").pop()!, v, 99);
   });
   return out;
 }

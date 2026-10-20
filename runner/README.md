@@ -81,6 +81,41 @@ only executes tests; the web server compares outputs, so hidden expected answers
 Statuses: `queued`, `compiling`, `running`, then `completed`, `compile_failed`, `runtime_error`,
 `timed_out`, `cancelled`, or `failed`. Errors look like `{ error: { code, message } }`.
 
+## Trace format (version 2)
+
+A `trace` result holds `steps`, one per recorded moment, plus `classes` (declared field and static
+types per user class, from the class files) and the input-replay fields (`io`, `stdin`). The
+visualizer reads only these facts; any recorder that emits them (a future Python tracer, for
+example) gets the same frames, labels, and call stack.
+
+| Step field | Meaning |
+| --- | --- |
+| `kind` | `line` (a line is about to run), `return` (a method is returning, its frame still on the stack), or `exception` |
+| `line`, `sourcePath`, `cls`, `method` | Where execution is |
+| `out` | Length of stdout so far, so output can be replayed in step |
+| `stack` | User-code frames, innermost first, at most 16 |
+| `stackDepth` | How many user frames there really were (more than `stack` holds in deep recursion) |
+| `ret`, `retType` | On `return` steps: the value the JVM actually returned (`{ "t": "void" }` for void) and the declared return type |
+| `statics` | Static fields of user classes, keyed `Class.field` (constants are skipped) |
+| `heap` | Objects reachable from frames and statics, by id; `null` when unchanged since the last step |
+
+| Frame field | Meaning |
+| --- | --- |
+| `id` | One per invocation: two calls of the same method, recursive or one after another, never share an id |
+| `depth` | 0 for the outermost user frame |
+| `locals` | Visible variables, plus `this` for instance methods |
+| `args` | Parameter names, sent on the frame's first step only |
+| `types` | Declared types of the visible variables (`java.util.Map<java.lang.String, java.lang.Integer>`), sent when they change |
+
+Values are `{ "t": type, "v": value }` for primitives, boxed values, and strings, `{ "t": "null" }`,
+or `{ "t": "ref", "id": "..." }` pointing into `heap`. Version 1 traces (no `id`, `types`, or `return`
+steps) are still read; their frames are keyed by depth and their labels use runtime classes.
+
+Known limits: a frame unwound by an exception is retired at the next recorded step rather than at
+the throw (the JVM sends no exit event for it); two variables with the same name in sibling blocks
+of one method share a row; `long` values past 2^53 lose precision in the browser and are flagged;
+NaN and infinities are recorded as non-finite without telling them apart.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -114,7 +149,7 @@ With a runner on port 8787 and `RUNNER_TOKEN=devtoken`:
 cd runner/tests
 python3 test_basic.py        # output, diagnostics, exceptions, packages, entry points, stdin
 python3 test_security.py     # timeouts, stop, caps, paths, memory, network, files, processes, rate limits
-python3 test_trace.py        # traces of sorting, objects, recursion, collections, exceptions, limits
+python3 test_trace.py        # traces of sorting, objects, recursion, frames and returns, declared types, exceptions, limits
 python3 test_examples.py     # all 20 examples: exact output, no warnings, complete traces
 python3 test_problems.py     # reference solutions pass; wrong ones fail for the right reasons
 ```

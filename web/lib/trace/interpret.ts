@@ -1,5 +1,7 @@
-import { applyLoops, detectExtraLayers, detectStructure, polishSequence, titleFor, type StructureView } from "./structures";
+import { applyLoops, detectExtraLayers, detectStructure, polishSequence, titleFor, type Detector, type StructureView } from "./structures";
 import { findLoops, trackLoops, type ActiveLoop } from "./loops";
+import { createScopeBuilder, frameTitle, normalizeTrace, type ClassInfo, type ScopeView } from "./scope";
+import { describeType, identifier, simpleName } from "./types";
 
 /**
  * Turns a raw execution recording (from any language's recorder) into visualization steps.
@@ -17,9 +19,25 @@ export type HeapObj =
   | { t: "list" | "stack" | "deque" | "heap" | "set"; cls: string; items: Val[]; buckets?: number[]; capacity?: number }
   | { t: "map"; cls: string; entries: [Val, Val][]; buckets?: number[]; capacity?: number }
   | { t: "opaque"; cls: string };
-export type RawFrame = { cls: string; method: string; line: number; locals: Record<string, Val> };
+export type RawFrame = {
+  cls: string;
+  method: string;
+  line: number;
+  locals: Record<string, Val>;
+  /** Trace v2: one id per invocation, so two calls of a method never share a frame. */
+  id?: number;
+  /** Call depth from the outermost user frame (0). */
+  depth?: number;
+  /** Parameter names, sent with the frame's first step. */
+  args?: string[];
+  /** Declared types of the visible variables, sent when they change. */
+  types?: Record<string, string>;
+  /** Filled in by normalizeTrace: a stable key for this invocation. */
+  key?: string;
+};
 export type RawStep = {
-  kind: "line" | "exception";
+  /** "return" steps are recorded as a method returns, while its frame is still on the stack. */
+  kind: "line" | "exception" | "return";
   line: number;
   sourcePath: string | null;
   cls: string;
@@ -28,6 +46,11 @@ export type RawStep = {
   stack: RawFrame[];
   statics?: Record<string, Val>;
   heap: Record<string, HeapObj> | null;
+  /** How many user frames were on the stack; the recorder sends at most 16 of them. */
+  stackDepth?: number;
+  /** The real return value on a "return" step ({ t: "void" } for void methods). */
+  ret?: Val;
+  retType?: string;
 };
 export type RawTrace = {
   /** Recorded input operations (Scanner, BufferedReader, StringTokenizer, parse calls) and the stdin they read. */
@@ -40,10 +63,16 @@ export type RawTrace = {
   truncated: boolean;
   stopReason: string | null;
   sourceMap: Record<string, string>;
+  /** Trace v2: declared field and static types per user class. */
+  classes?: Record<string, ClassInfo>;
 };
 
 export type ArrayView = {
   name: string;
+  /** Declared type of the variable that holds it here, or the runtime type when none was recorded. */
+  type: string | null;
+  /** Other variables holding this same array: "arr in main". */
+  aliases: string[];
   values: (number | string | boolean | null)[];
   pointers: { name: string; index: number }[];
   reads: number[];
@@ -53,7 +82,7 @@ export type ArrayView = {
 export type VizVar = { name: string; value: string; changed: boolean };
 export type VizStep = {
   index: number;
-  kind: "line" | "exception";
+  kind: "line" | "exception" | "return";
   line: number;
   file: string | null;
   method: string;
@@ -68,11 +97,15 @@ export type VizStep = {
   /** Loops running at this step, outermost first. */
   loops: ActiveLoop[];
   note: string;
+  /** Call frames, their variables, static fields, and the call or return at this step. */
+  scope: ScopeView | null;
 };
 export type Interpretation = {
   steps: VizStep[];
   array: { name: string; length: number; id: string } | null;
   structure: StructureView["kind"] | null;
+  /** The primary structure's floating label: "scores : Map<String, Integer>". */
+  title: string;
   /** The structures drawn together, when the program holds more than one. */
   layers: { key: string; title: string }[];
 };
@@ -120,7 +153,9 @@ function evalIndex(expr: string, ints: Record<string, number>): number | null {
   return m[2] ? base + (m[2] === "+" ? 1 : -1) * Number(m[3]) : base;
 }
 
-export function interpret(trace: RawTrace, sources: Record<string, string> = {}): Interpretation {
+export function interpret(raw: RawTrace, sources: Record<string, string> = {}): Interpretation {
+  /* 0. Frame ids, parameter names, and declared types are sent once; carry them forward. */
+  const trace = normalizeTrace(raw);
   /* 1. Heaps are only sent when they change; carry the latest one forward. */
   const heaps: Record<string, HeapObj>[] = [];
   let current: Record<string, HeapObj> = {};
@@ -177,7 +212,7 @@ export function interpret(trace: RawTrace, sources: Record<string, string> = {})
   let maxLength = 0;
 
   const detector = detectStructure(trace.steps, heaps);
-  const extra = detectExtraLayers(trace.steps, heaps, detector, sources);
+  const extra = detectExtraLayers(trace.steps, heaps, detector, sources, 4, trace.classes);
   const loopsPerStep = trackLoops(trace, findLoops(sources));
   const lineOf = (st: RawStep) => {
     const f = st.sourcePath ? trace.sourceMap[st.sourcePath] ?? st.sourcePath : null;
@@ -257,7 +292,31 @@ export function interpret(trace: RawTrace, sources: Record<string, string> = {})
         .slice(0, 4)
         .map(([name, index]) => ({ name, index }));
 
-      array = { name: localName, values, pointers, reads: [...reads], writes, swap };
+      /* The label uses the declared type where it was recorded: this frame's local, the field of
+         `this`, another frame's local, or a static field, whichever holds the array by that name. */
+      let declared: string | undefined;
+      let source = "";
+      const inFrame = s.stack.findIndex((f) => f.locals[localName]?.t === "ref" && f.locals[localName].id === primaryId);
+      const inStatic = Object.keys(s.statics ?? {}).find((q) => q.endsWith(`.${localName}`) && s.statics![q].t === "ref" && s.statics![q].id === primaryId);
+      if (inFrame === 0) { declared = top?.types?.[localName]; source = `0:${localName}`; }
+      else if (fieldName && self?.t === "object") { declared = trace.classes?.[self.cls]?.fields[fieldName]; source = "field"; }
+      else if (inFrame > 0) { declared = s.stack[inFrame].types?.[localName]; source = `${inFrame}:${localName}`; }
+      else if (inStatic) { declared = trace.classes?.[inStatic.slice(0, inStatic.lastIndexOf("."))]?.statics[localName]; source = inStatic; }
+      const type = describeType(declared, heap[primaryId]).type;
+      const aliases: string[] = [];
+      s.stack.forEach((f, depth) => {
+        for (const [nm, v] of Object.entries(f.locals)) {
+          if (v.t !== "ref" || v.id !== primaryId || nm === "this" || `${depth}:${nm}` === source) continue;
+          const text = `${nm} in ${frameTitle(f.method, f.cls)}`;
+          if (aliases.length < 2 && !aliases.includes(text)) aliases.push(text);
+        }
+      });
+      for (const [q, v] of Object.entries(s.statics ?? {})) {
+        if (v.t !== "ref" || v.id !== primaryId || q === source || aliases.length >= 2) continue;
+        aliases.push(`${simpleName(q.slice(0, q.lastIndexOf(".")))}.${q.slice(q.lastIndexOf(".") + 1)}`);
+      }
+
+      array = { name: localName, type, aliases, values, pointers, reads: [...reads], writes, swap };
 
       if (swap) note = `Swap ${localName}[${swap[0]}] and ${localName}[${swap[1]}]`;
       else if (writes.length === 1) {
@@ -288,6 +347,7 @@ export function interpret(trace: RawTrace, sources: Record<string, string> = {})
       layers: extra.map((l) => ({ key: l.key, title: l.title, view: l.detector.view({ step: s, heap, line: lineOf(s) }) })),
       loops: loopsPerStep[k] ?? [],
       note,
+      scope: null,
     };
   });
   if (detector && (detector.kind === "stack" || detector.kind === "queue")) polishSequence(steps.map((st) => st.structure));
@@ -295,7 +355,9 @@ export function interpret(trace: RawTrace, sources: Record<string, string> = {})
     if (l.detector.kind === "stack" || l.detector.kind === "queue") polishSequence(steps.map((st) => st.layers[i].view));
   });
   /* The primary structure joins the layers when there is more than one structure to show. */
-  const primaryTitle = detector ? titleFor(detector, trace.steps, heaps) : "";
+  let primaryTitle = detector ? titleFor(detector, trace.steps, heaps, trace.classes) : "";
+  /* Trees and linked lists found by their node class are named after the variable holding them. */
+  if (detector && !detector.name) primaryTitle = ownerLabel(trace, heaps, detector, primaryTitle);
   const multi = extra.length + (detector ? 1 : 0) >= 2;
   for (const st of steps) {
     if (multi && detector) st.layers.unshift({ key: "primary", title: primaryTitle, view: st.structure });
@@ -311,6 +373,25 @@ export function interpret(trace: RawTrace, sources: Record<string, string> = {})
       }
     }
   }
+  /* Variables, frames, and static fields per step, with references marked when the scene draws them. */
+  const build = createScopeBuilder({ classes: trace.classes });
+  const arrayLabel = (st: VizStep) => (st.array ? identifier(st.array.name, st.array.type) : "");
+  steps.forEach((st, k) => {
+    const drawn = new Map<string, string>();
+    if (primaryId && st.array) drawn.set(primaryId, arrayLabel(st));
+    const views: { title: string; view: StructureView | null }[] = multi ? st.layers : [{ title: primaryTitle, view: st.structure }];
+    for (const { title, view } of views) {
+      if (!view) continue;
+      if (view.name) {
+        const hit = rootsOf(trace.steps[k]).find(([nm, v]) => nm === view.name && v.t === "ref");
+        if (hit) drawn.set(hit[1].id as string, title);
+      } else if (view.kind === "tree" || view.kind === "list") for (const n of view.nodes) if (heaps[k][n.id]) drawn.set(n.id, title);
+    }
+    st.scope = build(trace.steps[k], heaps[k], drawn);
+    /* A return is worth saying unless the line already says something more specific. */
+    if (st.kind === "return" && st.note.startsWith("Line ") && st.scope.event) st.note = st.scope.event.text;
+  });
+
   /* Structure captions are more specific than line notes when nothing else happened. */
   /* Stacks, queues, and maps narrate their own operations, so their caption always wins. */
   const seqView = detector?.kind === "stack" || detector?.kind === "queue" || detector?.kind === "map";
@@ -320,10 +401,60 @@ export function interpret(trace: RawTrace, sources: Record<string, string> = {})
     if (badge && (st.note.startsWith("Line ") || /^\d+ (element|entr|item|node)/.test(st.note) || / is empty$/.test(st.note) || /: \d+ elements?$/.test(st.note))) st.note = badge;
   }
 
+  /* Calls narrate themselves when nothing more specific happened on that step. */
+  for (const st of steps) if (st.note.startsWith("Line ") && st.scope?.event) st.note = st.scope.event.text;
+
   return {
     steps,
     array: primaryId && primaryName ? { name: primaryName, length: maxLength, id: primaryId } : null,
     structure: detector?.kind ?? null,
+    title: primaryTitle,
     layers: steps[0]?.layers.map((l) => ({ key: l.key, title: l.title })) ?? [],
   };
+}
+
+/** Locals of every frame (innermost first) and then static fields, as [name, value] pairs. */
+function rootsOf(step: RawStep): [string, Val][] {
+  const out: [string, Val][] = [];
+  for (const f of step.stack) for (const [n, v] of Object.entries(f.locals)) out.push([n, v]);
+  for (const [n, v] of Object.entries(step.statics ?? {})) out.push([n.slice(n.lastIndexOf(".") + 1), v]);
+  return out;
+}
+
+/**
+ * The variable that owns a structure found by its class rather than by a name: one that points at
+ * a node (root, head), or an object with a field that does (a list holding head, or the stack
+ * object itself). Statics and outer frames come first, so the label names the owner, not a cursor.
+ */
+function ownerLabel(trace: RawTrace, heaps: Record<string, HeapObj>[], detector: Detector, fallback: string): string {
+  const cls = detector.cls;
+  if (!cls) return fallback;
+  const isNode = (v: Val, heap: Record<string, HeapObj>) => v.t === "ref" && heap[v.id as string]?.t === "object" && (heap[v.id as string] as { cls: string }).cls === cls;
+  const holds = (v: Val, heap: Record<string, HeapObj>) => {
+    const o = v.t === "ref" ? heap[v.id as string] : undefined;
+    return o?.t === "object" && Object.values(o.fields).some((x) => isNode(x, heap));
+  };
+  /* Stack and queue classes are the structure themselves; trees and lists are reached through a node. */
+  const direct = detector.kind === "stack" || detector.kind === "queue";
+  /* Rank 0 is a static field, 1 the outermost frame, and so on inward; the lowest rank seen wins. */
+  const best = { rank: 99, label: fallback };
+  for (let k = 0; k < Math.min(trace.steps.length, 600) && best.rank > 1; k++) {
+    const heap = heaps[k];
+    const step = trace.steps[k];
+    const consider = (rank: number, name: string, v: Val, declared: string | undefined) => {
+      if (best.rank <= rank) return;
+      if (!(isNode(v, heap) || (!direct && holds(v, heap)))) return;
+      best.rank = rank;
+      best.label = `${identifier(name, describeType(declared, heap[v.id as string]).type)} (${fallback})`;
+    };
+    for (const [q, v] of Object.entries(step.statics ?? {})) {
+      const owner = q.slice(0, q.lastIndexOf(".")), field = q.slice(q.lastIndexOf(".") + 1);
+      consider(0, field, v, trace.classes?.[owner]?.statics[field]);
+    }
+    step.stack.forEach((f) => {
+      const rank = 1 + (f.depth ?? 0);
+      for (const [n, v] of Object.entries(f.locals)) if (n !== "this" && n !== "args") consider(rank, n, v, f.types?.[n]);
+    });
+  }
+  return best.label;
 }

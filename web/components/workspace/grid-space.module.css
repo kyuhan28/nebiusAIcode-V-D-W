@@ -1,0 +1,39 @@
+/*
+ * A quiet floor of grid lines receding into the dark, for runs with no data structure to draw.
+ * Static (no motion), behind everything, and it never takes pointer events.
+ */
+.space {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background: linear-gradient(180deg, #000 0%, #030509 55%, #050a10 72%, #010203 100%);
+}
+.floor {
+  position: absolute;
+  left: -60%;
+  right: -60%;
+  top: 44%;
+  height: 130%;
+  transform-origin: 50% 0;
+  transform: perspective(420px) rotateX(64deg);
+  /* The same final colors the 3D floor lands on after tone mapping: major near rgb(7, 35, 51). */
+  background-image:
+    linear-gradient(rgba(40, 150, 200, 0.2) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(40, 150, 200, 0.2) 1px, transparent 1px),
+    linear-gradient(rgba(110, 140, 190, 0.075) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(110, 140, 190, 0.075) 1px, transparent 1px);
+  background-size: 160px 160px, 160px 160px, 32px 32px, 32px 32px;
+  background-position: center top;
+  /* Lines dissolve into the dark at the horizon (the top edge, farthest away) and at the sides. */
+  mask-image: radial-gradient(ellipse 46% 62% at 50% 46%, #000 0%, rgba(0, 0, 0, 0.6) 48%, transparent 82%);
+  -webkit-mask-image: radial-gradient(ellipse 46% 62% at 50% 46%, #000 0%, rgba(0, 0, 0, 0.6) 48%, transparent 82%);
+}
+.horizon {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 40%;
+  height: 16%;
+  background: radial-gradient(ellipse 50% 100% at 50% 100%, rgba(111, 233, 255, 0.035), transparent 70%);
+}

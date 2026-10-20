@@ -103,6 +103,74 @@ check("HashMap read as entries", obj("map")["t"] == "map" and sorted((e[0]["v"],
 check("ArrayDeque read in order", [x["v"] for x in obj("stack")["items"]] == [2, 1], obj("stack"))
 check("TreeMap read in sorted order", [e[0]["v"] for e in obj("tree")["entries"]] == [1, 2, 3], obj("tree"))
 
+section("call frames, returns, scopes, and declared types")
+frames_src = {"Calls.java": """import java.util.*;
+public class Calls {
+  static int total = 100;
+  static Map<String, List<Integer>> index = new HashMap<>();
+  static int factorial(int n) {
+    if (n <= 1) {
+      return 1;
+    }
+    return n * factorial(n - 1);
+  }
+  static int add(int value) {
+    total += value;
+    return total;
+  }
+  static int twice(int x) {
+    int y = x * 2;
+    return y;
+  }
+  static int boom(int n) {
+    if (n == 0) throw new IllegalStateException("bottom");
+    return boom(n - 1);
+  }
+  public static void main(String[] args) {
+    int x = 7;
+    int r = factorial(4);
+    add(5);
+    add(10);
+    int t = twice(x);
+    try { boom(2); } catch (IllegalStateException e) { x = -1; }
+    int again = twice(3);
+    System.out.println(r + " " + total + " " + t + " " + again);
+  }
+}
+"""}
+s, j = execute(frames_src, mode="trace")
+r = j["result"]; t = r["trace"]; st = t["steps"]
+check("trace completes and reports version 2", j["status"] == "completed" and t["version"] == 2, (j["status"], t.get("version")))
+fact = [x for x in st if x["stack"][0]["method"] == "factorial"]
+ids = {}
+for x in fact:
+    f = x["stack"][0]; ids.setdefault(f["id"], set()).add(f["locals"]["n"]["v"])
+check("each recursive call has its own frame id holding its own n", sorted(sorted(v) for v in ids.values()) == [[1], [2], [3], [4]], ids)
+deep = max(fact, key=lambda x: x["stackDepth"])
+check("frames carry call depth, innermost first", [f["depth"] for f in deep["stack"]] == [4, 3, 2, 1, 0] and deep["stackDepth"] == 5, [f["depth"] for f in deep["stack"]])
+rets = [(x["stack"][0]["locals"]["n"]["v"], x["ret"]["v"]) for x in st if x["kind"] == "return" and x["method"] == "factorial"]
+check("unwinding is recorded: each frame returns its real value, innermost first", rets == [(1, 1), (2, 2), (3, 6), (4, 24)], rets)
+first = next(x["stack"][0] for x in st if x["method"] == "factorial")
+check("parameter names are sent with a frame's first step", first.get("args") == ["n"], first.get("args"))
+adds = [x["ret"]["v"] for x in st if x["kind"] == "return" and x["method"] == "add"]
+totals = [x["statics"]["Calls.total"]["v"] for x in st if "Calls.total" in x.get("statics", {})]
+check("static field changes are recorded as they happen", adds == [105, 115] and 100 in totals and totals[-1] == 115 and totals.index(105) < totals.index(115), (adds, sorted(set(totals))))
+check("declared static types keep their generic arguments", t["classes"]["Calls"]["statics"] == {"total": "int", "index": "java.util.Map<java.lang.String, java.util.List<java.lang.Integer>>"}, t["classes"].get("Calls"))
+types = {}
+for x in st:
+    for f in x["stack"]:
+        if f["method"] == "main" and "types" in f: types.update(f["types"])
+check("local declared types are recorded", types.get("args") == "java.lang.String[]" and types.get("x") == "int" and types.get("r") == "int", types)
+tw = [x for x in st if x["stack"][0]["method"] == "twice"]
+check("two calls of one method get different frames", len({x["stack"][0]["id"] for x in tw}) == 2, {x["stack"][0]["id"] for x in tw})
+main_x = {x["stack"][-1]["locals"]["x"]["v"] for x in tw}
+check("a callee's x never replaces the caller's x", main_x <= {7, -1} and all(x["stack"][0]["locals"]["x"]["v"] in (7, 3) for x in tw), main_x)
+boom_ids = {x["stack"][0]["id"] for x in st if x["stack"][0]["method"] == "boom"}
+check("frames unwound by an exception are not reused", not (boom_ids & {x["stack"][0]["id"] for x in tw}) and len(boom_ids) == 3, boom_ids)
+void = [x for x in st if x["kind"] == "return" and x["method"] == "main"]
+check("void returns are marked void", len(void) == 1 and void[0]["ret"] == {"t": "void"}, void[-1:] and void[-1].get("ret"))
+check("program output is unchanged", r["stdout"].strip() == "24 115 14 6", r["stdout"])
+
 section("exceptions and limits while tracing")
 s, j = execute({"Boom.java": 'public class Boom {\n  public static void main(String[] a) {\n    int[] x = new int[2];\n    for (int i = 0; i <= 2; i++) x[i] = i;\n  }\n}\n'}, mode="trace")
 ex = j["result"].get("exception") or {}
