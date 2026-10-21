@@ -3,7 +3,7 @@ export type Example = {
   id: string;
   file: string;
   title: string;
-  category: "Data structures" | "Graph algorithms" | "Sorting and searching" | "Recursion and dynamic programming" | "Compression" | "Machine learning" | "Input and output" | "Object-oriented programming" | "Python";
+  category: "Data structures" | "Graph algorithms" | "Sorting and searching" | "Recursion and dynamic programming" | "Compression" | "Machine learning" | "Input and output" | "Object-oriented programming" | "Python" | "C: memory and pointers" | "C++";
   summary: string;
   complexity: string;
   visual: "tree" | "list" | "graph" | "map" | "array" | "stack" | "grid" | "points" | "input" | "none";
@@ -46,6 +46,7 @@ export const EXAMPLES: Example[] = [
   e("BubbleSortExample", "Bubble sort", "Sorting and searching", "Swap adjacent out-of-order pairs until a pass makes no swaps.", "O(n²) time, O(1) space", "array"),
   e("MergeSortExample", "Merge sort", "Sorting and searching", "Split in half, sort each half, and merge them back together.", "O(n log n) time, O(n) space", "array"),
   e("QuickSortExample", "Quicksort", "Sorting and searching", "Partition around a pivot, then sort each side.", "O(n log n) average, O(n²) worst", "array"),
+  e("PermutationsExample", "Permutations (backtracking)", "Recursion and dynamic programming", "Every ordering of 1, 2, 3: choose a number, recurse, then undo the choice.", "O(n · n!) time; recursion uses O(n) stack", "array"),
   e("FactorialExample", "Factorial", "Recursion and dynamic programming", "n! recursively and with a loop, and why long stops at 20!.", "O(n) time; recursion uses O(n) stack", "none"),
   e("FibonacciExample", "Fibonacci", "Recursion and dynamic programming", "Plain recursion, memoization, and a bottom-up table, side by side.", "naive O(2ⁿ); memoized and bottom-up O(n)", "array"),
   e("ClimbingStairsExample", "Climbing stairs", "Recursion and dynamic programming", "Count the ways to climb n steps one or two at a time.", "O(n) time and space", "array"),
@@ -66,6 +67,158 @@ export const EXAMPLES: Example[] = [
   { ...e("ReadUntilEndExample", "Read until the end", "Input and output", "hasNextInt() keeps a loop going until the input runs out.", "reading an unknown amount", "input"), stdin: "5 10 15\n20\n" },
   { ...e("InvalidNumberExample", "Invalid numbers", "Input and output", "Catch NumberFormatException for lines like \"abc\" and \"3.5\".", "parse errors, handled", "input"), stdin: "12\nabc\n7\n3.5\n" },
   { ...e("ReadMatrixExample", "Reading a matrix", "Input and output", "Read the size, then fill a 2D array value by value.", "a grid filled from input", "input"), stdin: "2 3\n1 2 3\n4 5 6\n" },
+  {
+    ...e("CStack", "Stack variables and calls", "C: memory and pointers", "Each call gets its own frame; swap receives addresses into main's frame.", "", "none"),
+    file: "main.c",
+    dir: "c_stack",
+    files: ["main.c"],
+  },
+  {
+    ...e("CMallocFree", "malloc and free", "C: memory and pointers", "Allocate, use, free, and see the pointer left dangling.", "", "none"),
+    file: "main.c",
+    dir: "c_malloc_free",
+    files: ["main.c"],
+  },
+  {
+    ...e("CCalloc", "calloc versus malloc", "C: memory and pointers", "calloc zeroes its memory; malloc's stays unset until written.", "", "none"),
+    file: "main.c",
+    dir: "c_calloc",
+    files: ["main.c"],
+  },
+  {
+    ...e("CRealloc", "realloc and a growing array", "C: memory and pointers", "Capacity doubles; watch realloc keep or move the block.", "", "none"),
+    file: "main.c",
+    dir: "c_realloc",
+    files: ["main.c"],
+  },
+  {
+    ...e("CPointerArithmetic", "Pointer arithmetic", "C: memory and pointers", "p + i moves i elements; one past the end may be formed, not used.", "", "none"),
+    file: "main.c",
+    dir: "c_pointer_arithmetic",
+    files: ["main.c"],
+  },
+  {
+    ...e("CStrings", "Dynamic strings", "C: memory and pointers", "A heap buffer grows with realloc as words are appended.", "", "none"),
+    file: "main.c",
+    dir: "c_strings",
+    files: ["main.c"],
+  },
+  {
+    ...e("CStructs", "Structs and pointers to structs", "C: memory and pointers", "A copy, a pointer, and a heap struct reached with ->.", "", "none"),
+    file: "main.c",
+    dir: "c_structs",
+    files: ["main.c"],
+  },
+  {
+    ...e("CLinkedList", "Linked list (3 files)", "C: memory and pointers", "Nodes on the heap, push through a pointer-to-pointer, freeing in order.", "", "none"),
+    file: "main.c",
+    dir: "c_linked_list",
+    files: ["main.c", "list.c", "list.h"],
+  },
+  {
+    ...e("CStackQueue", "Stack and queue", "C: memory and pointers", "An array stack and a linked queue that frees as it dequeues.", "", "none"),
+    file: "main.c",
+    dir: "c_stack_queue",
+    files: ["main.c"],
+  },
+  {
+    ...e("CBinaryTree", "Binary search tree", "C: memory and pointers", "One heap node per value, an in-order walk, and freeing children first.", "", "none"),
+    file: "main.c",
+    dir: "c_binary_tree",
+    files: ["main.c"],
+  },
+  {
+    ...e("CPointerToPointer", "Pointer-to-pointer parameters", "C: memory and pointers", "A function that changes the caller's int, and one that sets the caller's pointer.", "", "none"),
+    file: "main.c",
+    dir: "c_pointer_to_pointer",
+    files: ["main.c"],
+  },
+  {
+    ...e("CLeak", "A memory leak (diagnostic)", "C: memory and pointers", "A block whose last pointer is lost: leaked at exit, reported by LeakSanitizer.", "", "none"),
+    file: "main.c",
+    dir: "c_leak",
+    files: ["main.c"],
+  },
+  {
+    ...e("CInvalidOps", "Invalid memory operations (safe demo)", "C: memory and pointers", "A dangling pointer by default; Input use or double shows the sanitizer stopping it.", "", "none"),
+    file: "main.c",
+    dir: "c_invalid_ops",
+    files: ["main.c"],
+    stdin: "show\n",
+  },
+  {
+    ...e("CppNewDelete", "new and delete", "C++", "new and delete for one object, new[] and delete[] for an array.", "", "none"),
+    file: "main.cpp",
+    dir: "cpp_new_delete",
+    files: ["main.cpp"],
+  },
+  {
+    ...e("CppVector", "std::vector growth", "C++", "Watch the vector's buffer get reallocated as it grows.", "", "none"),
+    file: "main.cpp",
+    dir: "cpp_vector",
+    files: ["main.cpp"],
+  },
+  {
+    ...e("CppSmartPointers", "unique_ptr, shared_ptr, weak_ptr", "C++", "Moving ownership, counting owners, and watching without owning.", "", "none"),
+    file: "main.cpp",
+    dir: "cpp_smart_pointers",
+    files: ["main.cpp"],
+  },
+  {
+    ...e("CppRaii", "RAII and object lifetime", "C++", "Constructors acquire, destructors release, in reverse order at scope end.", "", "none"),
+    file: "main.cpp",
+    dir: "cpp_raii",
+    files: ["main.cpp"],
+  },
+  {
+    ...e("CppStackObjects", "Stack objects and references", "C++", "Objects in main's frame, references to them, and destruction in reverse order.", "", "none"),
+    file: "main.cpp",
+    dir: "cpp_stack_objects",
+    files: ["main.cpp"],
+  },
+  {
+    ...e("CppArrays", "Arrays and pointer arithmetic", "C++", "A built-in array walked by pointer, std::array, and new[] with delete[].", "", "none"),
+    file: "main.cpp",
+    dir: "cpp_arrays",
+    files: ["main.cpp"],
+  },
+  {
+    ...e("CppConstructors", "Constructors and destructors", "C++", "Base, member, then body; destruction in exactly the reverse order.", "", "none"),
+    file: "main.cpp",
+    dir: "cpp_constructors",
+    files: ["main.cpp"],
+  },
+  {
+    ...e("CppCopyMove", "Copy and move semantics", "C++", "Copying allocates a new block; moving takes it over and empties the source.", "", "none"),
+    file: "main.cpp",
+    dir: "cpp_copy_move",
+    files: ["main.cpp"],
+  },
+  {
+    ...e("CppInheritance", "Inheritance and polymorphism", "C++", "Virtual dispatch through unique_ptr<Animal>, and virtual destructors.", "", "none"),
+    file: "main.cpp",
+    dir: "cpp_inheritance",
+    files: ["main.cpp"],
+  },
+  {
+    ...e("CppContainers", "Standard containers", "C++", "vector, map, set, unordered_map, stack, queue, and priority_queue.", "", "none"),
+    file: "main.cpp",
+    dir: "cpp_containers",
+    files: ["main.cpp"],
+  },
+  {
+    ...e("CppListTree", "Linked list and tree with unique_ptr", "C++", "Nodes own their successors, so everything is freed with no delete.", "", "none"),
+    file: "main.cpp",
+    dir: "cpp_list_tree",
+    files: ["main.cpp"],
+  },
+  {
+    ...e("CppLifetimeMistakes", "Lifetime mistakes (safe demo)", "C++", "Dangling references, moved-from objects, and weak_ptr expiry, by Input.", "", "none"),
+    file: "main.cpp",
+    dir: "cpp_lifetime_mistakes",
+    files: ["main.cpp"],
+    stdin: "safe\n",
+  },
   {
     ...e("PyHello", "Python basics", "Python", "Variables, runtime types, arithmetic, and f-strings.", "watch a name change type", "none"),
     file: "hello.py",

@@ -5,6 +5,7 @@
 static void *cv_new(std::size_t n, unsigned long kind) {
   void *p = __real_malloc(n ? n : 1);
   if (!p) throw std::bad_alloc();
+  memset(p, 0xBE, n);  /* storage before construction: whatever a constructor leaves unset shows as uninitialized */
   __cv_log(kind, p, 0, n, 1);
   return p;
 }

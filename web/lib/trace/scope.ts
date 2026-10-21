@@ -73,7 +73,7 @@ export type ScopeView = {
   event: ScopeEvent | null;
   heap: Record<string, HeapObj>;
   /** The language of the recording: Python shows module globals rather than static fields. */
-  language: "java" | "python";
+  language: "java" | "python" | "c";
 };
 
 export type ClassInfo = { fields: Record<string, string>; statics: Record<string, string>; super?: string };
@@ -113,7 +113,7 @@ const INTEGERS = new Set(["long", "Long"]);
 
 const quote = (s: string) => JSON.stringify(s);
 /* Python shows values the way Python prints them: 'text', True, None. Set per recording. */
-let STYLE: "java" | "python" = "java";
+let STYLE: "java" | "python" | "c" = "java";
 const pyQuote = (s: string) => (s.includes("'") && !s.includes('"') ? JSON.stringify(s) : `'${JSON.stringify(s).slice(1, -1).replace(/\\"/g, '"').replace(/'/g, "\\'")}'`);
 const charText = (c: string) => `'${c === "\n" ? "\\n" : c === "\t" ? "\\t" : c === "'" ? "\\'" : c === "\\" ? "\\\\" : c}'`;
 
@@ -149,7 +149,11 @@ function itemsOf(o: HeapObj): Val[] | null {
 
 /** A compact, Java-flavored rendering. depth limits how far nested references are spelled out. */
 export function summarize(v: Val, heap: Record<string, HeapObj>, depth = 0): string {
-  if (v.t === "null") return STYLE === "python" ? "None" : "null";
+  if (v.t === "null") return STYLE === "python" ? "None" : STYLE === "c" ? "NULL" : "null";
+  /* C and C++: bytes never written since malloc or new, and pointers, shown by what they point at. */
+  if (v.t === "uninit") return "? (uninitialized)";
+  if (v.t === "ptr") return v.state === "dangling" ? `dangling → freed block #${v.block}` : v.state === "stack" ? `&${v.var}` : v.state === "static" && typeof v.string === "string" ? JSON.stringify(v.string) : String(v.v);
+  if (v.t === "enum") return String(v.v);
   if (v.t === "void") return "void";
   if (v.t !== "ref") return primitive(v);
   const o = heap[v.id as string];
@@ -226,7 +230,7 @@ export function frameTitle(method: string, cls: string): string {
   return method;
 }
 
-type BuildOptions = { classes?: Record<string, ClassInfo>; language?: "java" | "python" };
+type BuildOptions = { classes?: Record<string, ClassInfo>; language?: "java" | "python" | "c" };
 
 type Memory = {
   values: Map<string, { value: string; ref: string | null }>;

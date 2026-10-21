@@ -1,5 +1,6 @@
 /* C side of the allocation log: wraps malloc, calloc, realloc, and free via the linker's --wrap. */
 #include <stdio.h>
+#include <string.h>
 #include "cvmem.h"
 #ifdef __cplusplus
 extern "C" {
@@ -28,7 +29,9 @@ __attribute__((noinline)) void __cv_log(unsigned long kind, void *addr, void *ol
   __cv_count++;
 }
 
-void *__wrap_malloc(size_t n) { void *p = __real_malloc(n); __cv_log(CV_MALLOC, p, 0, n, 1); return p; }
+/* malloc's memory has unspecified contents; filling it with 0xBE (one legal outcome) lets the memory view
+   show which bytes were never written. calloc's memory is zeroed, as C requires. */
+void *__wrap_malloc(size_t n) { void *p = __real_malloc(n); if (p) memset(p, 0xBE, n); __cv_log(CV_MALLOC, p, 0, n, 1); return p; }
 void *__wrap_calloc(size_t c, size_t n) { void *p = __real_calloc(c, n); __cv_log(CV_CALLOC, p, 0, c * n, c); return p; }
 void *__wrap_realloc(void *old, size_t n) { void *p = __real_realloc(old, n); __cv_log(CV_REALLOC, p, old, n, 1); return p; }
 void __wrap_free(void *p) { __cv_log(CV_FREE, p, 0, 0, 0); __real_free(p); }

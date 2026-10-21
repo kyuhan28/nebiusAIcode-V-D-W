@@ -12,7 +12,23 @@ import { describeType, identifier, simpleName } from "./types";
  * without one still get line, variable, and output playback.
  */
 
-export type Val = { t: string; v?: unknown; id?: string };
+export type Val = {
+  t: string;
+  v?: unknown;
+  id?: string;
+  /* C and C++ pointers (from bin/ctrace.py): what they point at, read from the stopped program. */
+  ptr?: boolean;
+  state?: "live" | "past-end" | "dangling" | "stack" | "global" | "static" | "unknown";
+  block?: number;
+  offset?: number;
+  index?: number | null;
+  addr?: string;
+  var?: string;
+  frameVar?: string;
+  string?: string;
+  type?: string;
+  code?: number;
+};
 export type HeapObj =
   | { t: "array"; of: string; len: number; items: Val[] }
   | { t: "object"; cls: string; fields: Record<string, Val> }
@@ -116,7 +132,43 @@ export type Interpretation = {
 
 const NUMERIC = new Set(["int", "long", "short", "byte", "double", "float", "char", "Integer", "Long", "Short", "Byte", "Double", "Float", "Character", "String"]);
 const SEQUENCES = new Set(["list", "stack", "deque"]);
-const INDEX_NAMES = /^(i|j|k|l|r|lo|hi|low|high|mid|left|right|start|end|min|max|minIndex|maxIndex|minIdx|maxIdx|idx|index|pos|p|q|a|b|cur|curr|slow|fast|key|top|head|tail|front|rear|parent|child|smallest|largest)$/;
+/**
+ * The variables a program uses as indexes into the array called `name`, from its own source:
+ * subscripts (arr[i], arr[j + 1], list.get(k)) and loops bounded by the array's length
+ * (i < arr.length, i < len(arr), range(len(arr))). A variable is drawn on the array only with this
+ * evidence; a scalar such as max or count never is, whatever its name or value.
+ */
+const KEYWORDS = new Set(["length", "size", "len", "int", "long", "new", "this", "self", "true", "false", "null", "None", "Math", "range"]);
+const indexUsersCache = new Map<string, Set<string>>();
+function indexUsers(sources: Record<string, string>, name: string): Set<string> {
+  const key = `${name}\u0000${Object.keys(sources).join("|")}`;
+  const hit = indexUsersCache.get(key);
+  if (hit) return hit;
+  const out = new Set<string>();
+  const ids = (expr: string) => { for (const id of expr.match(/[A-Za-z_]\w*/g) ?? []) if (id !== name && !KEYWORDS.has(id)) out.add(id); };
+  const n = name.replace(/[$]/g, "\\$");
+  for (const text of Object.values(sources)) {
+    for (const m of text.matchAll(new RegExp(`\\b${n}\\s*\\[([^\\]]+)\\]`, "g"))) ids(m[1]);
+    for (const m of text.matchAll(new RegExp(`\\b${n}\\s*\\.\\s*(?:get|set|remove)\\(\\s*([^,)]+)`, "g"))) ids(m[1]);
+    for (const m of text.matchAll(new RegExp(`\\b([A-Za-z_]\\w*)\\s*<=?\\s*(?:${n}\\s*\\.\\s*(?:length|size\\s*\\(\\s*\\))|len\\(\\s*${n}\\s*\\))`, "g"))) out.add(m[1]);
+    for (const m of text.matchAll(new RegExp(`for\\s+([A-Za-z_]\\w*)\\s+in\\s+range\\((?:[^,()]*,\\s*)?len\\(\\s*${n}\\s*\\)`, "g"))) out.add(m[1]);
+  }
+  /* Variables that compute an index are index variables too: in mid = (lo + hi) / 2, lo and hi. */
+  for (let round = 0; round < 3; round++) {
+    const before = out.size;
+    for (const u of [...out]) {
+      const uu = u.replace(/[$]/g, "\\$");
+      for (const text of Object.values(sources)) {
+        for (const m of text.matchAll(new RegExp(`\\b${uu}\\s*[-+*/]?=(?!=)\\s*([^;\\n]+)`, "g"))) {
+          for (const id of m[1].replace(/[A-Za-z_]\w*\s*\(/g, "(").match(/[A-Za-z_]\w*/g) ?? []) if (id !== name && !KEYWORDS.has(id)) out.add(id);
+        }
+      }
+    }
+    if (out.size === before) break;
+  }
+  indexUsersCache.set(key, out);
+  return out;
+}
 
 function sequenceItems(obj: HeapObj | undefined): Val[] | null {
   if (!obj) return null;
@@ -151,6 +203,24 @@ function display(v: Val, heap: Record<string, HeapObj>): string {
 }
 
 /** Evaluates simple index expressions like i, j + 1, mid - 1, 3, using the frame's ints. */
+/** The sequences bound to names a Python step can see: its locals first, then the program's module globals. */
+function pyScope(s: RawStep, heap: Record<string, HeapObj>): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const [n, v] of Object.entries(s.stack[0]?.locals ?? {})) if (v.t === "ref" && sequenceItems(heap[v.id as string])) m.set(n, v.id as string);
+  for (const [q, v] of Object.entries(s.statics ?? {})) {
+    const n = q.startsWith("__main__.") ? q.slice(9) : null;
+    if (n && !m.has(n) && v.t === "ref" && sequenceItems(heap[v.id as string])) m.set(n, v.id as string);
+  }
+  return m;
+}
+
+/** A Python value as the cell shows it: None, True, and False as Python writes them. */
+function pyPlain(v: Val): ReturnType<typeof plain> {
+  if (v.t === "null") return "None" as ReturnType<typeof plain>;
+  if (v.t === "boolean" || v.t === "bool") return (v.v ? "True" : "False") as ReturnType<typeof plain>;
+  return plain(v);
+}
+
 function evalIndex(expr: string, ints: Record<string, number>): number | null {
   const m = expr.trim().match(/^([A-Za-z_]\w*|\d+)\s*(?:([+-])\s*(\d+))?$/);
   if (!m) return null;
@@ -212,6 +282,10 @@ export function interpret(raw: RawTrace, sources: Record<string, string> = {}): 
     : null;
 
   /* 3. Build each step. */
+  const python = trace.language === "python";
+  let tracked: { name: string; id: string } | null = python && primaryId && primaryName ? { name: primaryName, id: primaryId } : null;
+  let prevScope = new Map<string, string>();
+  let prevShownId: string | null = null;
   let prevValues: ArrayView["values"] | null = null;
   let prevVars = new Map<string, string>();
   const recentWrites: { step: number; index: number; from: unknown; to: unknown }[] = [];
@@ -242,20 +316,42 @@ export function interpret(raw: RawTrace, sources: Record<string, string> = {}): 
     let array: ArrayView | null = null;
     let note = s.kind === "exception" ? "The program stopped with an exception here" : `Line ${s.line} in ${s.method}()`;
 
-    const items = primaryId ? sequenceItems(heap[primaryId]) : null;
-    if (items && primaryId) {
-      const values = items.map(plain);
+    /* Python binds names to objects and re-binds them freely: follow the variable, not the first list seen. */
+    let shownId = primaryId;
+    let shownName: string | null = null;
+    if (python) {
+      const scope = pyScope(s, heap);
+      /* What the last statement bound (a new name, or a name re-bound to another list) comes first; then the
+         name already shown; then whichever name holds the same list (a parameter, a returned value). */
+      const changed = [...scope].find(([n, id]) => prevScope.get(n) !== id);
+      const kept = tracked && scope.has(tracked.name) ? ([tracked.name, scope.get(tracked.name)!] as [string, string]) : undefined;
+      const same = tracked ? [...scope].find(([, id]) => id === tracked!.id) : undefined;
+      const c = changed ?? kept ?? same ?? [...scope][0];
+      const pick: { name: string; id: string } | null = c ? { name: c[0], id: c[1] } : null;
+      prevScope = scope;
+      if (pick) tracked = pick;
+      shownId = tracked?.id ?? null;
+      shownName = tracked?.name ?? null;
+      /* A different object than the last step: its cells were not "written", it was swapped in. */
+      if (shownId !== prevShownId) { prevValues = null; recentWrites.length = 0; }
+      prevShownId = shownId;
+    }
+    const items = shownId ? sequenceItems(heap[shownId]) : null;
+    if (items && shownId) {
+      const values = items.map(python ? pyPlain : plain);
       maxLength = Math.max(maxLength, values.length);
       const ints: Record<string, number> = {};
       const isInt = (v: Val) => (v.t === "int" || v.t === "Integer" || v.t === "long" || v.t === "short") && typeof v.v === "number";
       /* Fields of the object the method runs on (top, head, tail) count as pointers too. */
       const self = top?.locals.this?.t === "ref" ? heap[top.locals.this.id as string] : undefined;
       if (self?.t === "object") for (const [name, v] of Object.entries(self.fields)) if (isInt(v)) ints[name] = v.v as number;
+      /* Python module globals (a top-level for loop's i) are visible too; locals win. */
+      if (python) for (const [q, v] of Object.entries(s.statics ?? {})) if (q.startsWith("__main__.") && isInt(v)) ints[q.slice(9)] = v.v as number;
       for (const [name, v] of Object.entries(top?.locals ?? {})) if (isInt(v)) ints[name] = v.v as number;
       /* The local that holds the array in this frame may have a different name (e.g. a parameter). */
-      const fieldName = self?.t === "object" ? Object.entries(self.fields).find(([, v]) => v.t === "ref" && v.id === primaryId)?.[0] : undefined;
-      const localName =
-        Object.entries(top?.locals ?? {}).find(([, v]) => v.t === "ref" && v.id === primaryId)?.[0] ?? fieldName ?? primaryName ?? "array";
+      const fieldName = self?.t === "object" ? Object.entries(self.fields).find(([, v]) => v.t === "ref" && v.id === shownId)?.[0] : undefined;
+      const localName = (python && shownName) ||
+        (Object.entries(top?.locals ?? {}).find(([, v]) => v.t === "ref" && v.id === shownId)?.[0] ?? fieldName ?? primaryName ?? "array");
 
       const writes: number[] = [];
       if (prevValues && prevValues.length === values.length) {
@@ -293,8 +389,9 @@ export function interpret(raw: RawTrace, sources: Record<string, string> = {}): 
         const id = expr.trim().match(/^[A-Za-z_]\w*/)?.[0];
         if (id && id in ints) named.add(id);
       }
+      const users = indexUsers(sources, localName);
       const pointers = Object.entries(ints)
-        .filter(([name, v]) => (named.has(name) || INDEX_NAMES.test(name)) && v >= 0 && v < values.length)
+        .filter(([name, v]) => (named.has(name) || users.has(name)) && v >= 0 && v < values.length)
         .slice(0, 4)
         .map(([name, index]) => ({ name, index }));
 
@@ -302,23 +399,24 @@ export function interpret(raw: RawTrace, sources: Record<string, string> = {}): 
          `this`, another frame's local, or a static field, whichever holds the array by that name. */
       let declared: string | undefined;
       let source = "";
-      const inFrame = s.stack.findIndex((f) => f.locals[localName]?.t === "ref" && f.locals[localName].id === primaryId);
-      const inStatic = Object.keys(s.statics ?? {}).find((q) => q.endsWith(`.${localName}`) && s.statics![q].t === "ref" && s.statics![q].id === primaryId);
+      const inFrame = s.stack.findIndex((f) => f.locals[localName]?.t === "ref" && f.locals[localName].id === shownId);
+      const inStatic = Object.keys(s.statics ?? {}).find((q) => q.endsWith(`.${localName}`) && s.statics![q].t === "ref" && s.statics![q].id === shownId);
       if (inFrame === 0) { declared = top?.types?.[localName]; source = `0:${localName}`; }
       else if (fieldName && self?.t === "object") { declared = trace.classes?.[self.cls]?.fields[fieldName]; source = "field"; }
       else if (inFrame > 0) { declared = s.stack[inFrame].types?.[localName]; source = `${inFrame}:${localName}`; }
       else if (inStatic) { declared = trace.classes?.[inStatic.slice(0, inStatic.lastIndexOf("."))]?.statics[localName]; source = inStatic; }
-      const type = describeType(declared, heap[primaryId]).type;
+      const described = describeType(declared, heap[shownId]).type;
+      const type = python && described === "ndarray" ? "numpy.ndarray" : described;
       const aliases: string[] = [];
       s.stack.forEach((f, depth) => {
         for (const [nm, v] of Object.entries(f.locals)) {
-          if (v.t !== "ref" || v.id !== primaryId || nm === "this" || `${depth}:${nm}` === source) continue;
+          if (v.t !== "ref" || v.id !== shownId || nm === "this" || `${depth}:${nm}` === source) continue;
           const text = `${nm} in ${frameTitle(f.method, f.cls)}`;
           if (aliases.length < 2 && !aliases.includes(text)) aliases.push(text);
         }
       });
       for (const [q, v] of Object.entries(s.statics ?? {})) {
-        if (v.t !== "ref" || v.id !== primaryId || q === source || aliases.length >= 2) continue;
+        if (v.t !== "ref" || v.id !== shownId || q === source || aliases.length >= 2) continue;
         aliases.push(`${simpleName(q.slice(0, q.lastIndexOf(".")))}.${q.slice(q.lastIndexOf(".") + 1)}`);
       }
 
@@ -380,7 +478,7 @@ export function interpret(raw: RawTrace, sources: Record<string, string> = {}): 
     }
   }
   /* Variables, frames, and static fields per step, with references marked when the scene draws them. */
-  const build = createScopeBuilder({ classes: trace.classes, language: trace.language === "python" ? "python" : "java" });
+  const build = createScopeBuilder({ classes: trace.classes, language: trace.language === "python" ? "python" : trace.language === "c" || trace.language === "cpp" ? "c" : "java" });
   const arrayLabel = (st: VizStep) => (st.array ? identifier(st.array.name, st.array.type) : "");
   steps.forEach((st, k) => {
     const drawn = new Map<string, string>();

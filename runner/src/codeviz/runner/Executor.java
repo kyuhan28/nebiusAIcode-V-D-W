@@ -253,6 +253,8 @@ public final class Executor {
     /* Declared field and static types per user class, from the class files. */
     trace.put("classes", t.getOrDefault("classes", Map.of()));
     if (res.get("language") != null) trace.put("language", res.get("language"));
+    /* C and C++: allocation totals and the blocks still allocated when the program ended. */
+    if (t.get("memorySummary") != null) trace.put("memorySummary", t.get("memorySummary"));
     /* C and C++: allocations, frees, and blocks, from the allocation log. */
     if (t.get("memory") != null) trace.put("memory", t.get("memory"));
     res.put("trace", trace);
@@ -454,7 +456,7 @@ public final class Executor {
       catch (Exception e) { throw new IOException("Could not find the runner's bin folder", e); }
     }
     Path dir = Files.createDirectories(ws.root.resolve("codeviz"));
-    for (String f : List.of("cvmem.h", "cvmem.c", "cvmem.cpp", "ctrace.py")) {
+    for (String f : List.of("cvmem.h", "cvmem.c", "cvmem.cpp", "ctrace.py", "unbuffered.c")) {
       if (!Files.exists(nativeHelpers.resolve(f))) continue;
       Files.copy(nativeHelpers.resolve(f), dir.resolve(f), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
       try { Files.setPosixFilePermissions(dir.resolve(f), java.nio.file.attribute.PosixFilePermissions.fromString("r--r--r--")); }
@@ -488,7 +490,7 @@ public final class Executor {
     List<String> sources = nativeUnits(req.files(), entry, cpp);
     res.put("units", sources);
     String entryDir = entry.contains("/") ? entry.substring(0, entry.lastIndexOf('/')) : "";
-    Path helpers = trace ? installNativeHelpers(ws) : null;
+    Path helpers = installNativeHelpers(ws);
     Path program = ws.out.resolve("program");
     List<String> cmd = new ArrayList<>(List.of(cpp ? "g++" : "gcc", cpp ? "-std=c++20" : "-std=c17", "-g", "-O0", "-fno-omit-frame-pointer",
         "-Wall", "-Wextra", "-fdiagnostics-format=json", "-I", path(ws, ws.src)));
@@ -496,9 +498,12 @@ public final class Executor {
     if (!entryDir.isEmpty()) cmd.addAll(List.of("-I", path(ws, ws.src.resolve(entryDir))));
     if (trace) {
       /* Fixed addresses (no PIE) and the allocation log; no sanitizers while recording. */
-      cmd.addAll(List.of("-no-pie", "-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free", "-I", path(ws, helpers), path(ws, helpers.resolve(cpp ? "cvmem.cpp" : "cvmem.c"))));
+      /* DWARF 4: the version bin/ctrace.py reads. */
+      cmd.addAll(List.of("-gdwarf-4", "-no-pie", "-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free", "-I", path(ws, helpers), path(ws, helpers.resolve(cpp ? "cvmem.cpp" : "cvmem.c"))));
     } else {
       cmd.addAll(List.of("-fsanitize=address,undefined", "-fno-sanitize-recover=undefined"));
+      /* Output survives a sanitizer stopping the program (see bin/unbuffered.c). */
+      cmd.add(path(ws, helpers.resolve("unbuffered.c")));
     }
     cmd.addAll(List.of("-o", path(ws, program)));
     for (String s : sources) cmd.add(path(ws, ws.src.resolve(s)));

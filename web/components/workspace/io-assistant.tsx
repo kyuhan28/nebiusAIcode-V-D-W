@@ -7,9 +7,11 @@ import type { ExecResult } from "@/lib/workspace/runner-client";
 export type IoRun = { result: ExecResult; input: string; file: string; source: string };
 
 type Props = {
-  files: string[];
+  /** The program this tab runs: the open file, the same target as the Run button. Empty when nothing can run. */
   file: string;
-  onFile: (path: string) => void;
+  language: string | null;
+  /** Why the open file can't run here (no main, a header, a data file), when it can't. */
+  hint: string | null;
   input: string;
   onInput: (v: string) => void;
   expected: string;
@@ -48,10 +50,11 @@ export function IoAssistant(p: Props) {
         Run your current code with an input to see what it really prints. Add an expected output to compare, or ask Nemotron to explain the result.
       </p>
 
-      <label className="mt-5 block text-[12px] font-medium text-zinc-500" htmlFor="io-file">Java file</label>
-      <select id="io-file" value={p.file} onChange={(e) => p.onFile(e.target.value)} className={`${field} mt-1.5 h-9 resize-none py-0`} style={{ fontFamily: p.fontFamily }}>
-        {p.files.map((f) => <option key={f} value={f}>{f}</option>)}
-      </select>
+      <p className="mt-5 text-[12px] text-zinc-500" aria-live="polite">
+        {p.file
+          ? <>Runs <span className="text-zinc-300" style={{ fontFamily: p.fontFamily }}>{p.file}</span>{p.language ? ` (${p.language})` : ""}, the file that is open.</>
+          : p.hint}
+      </p>
 
       <label className="mt-4 block text-[12px] font-medium text-zinc-500" htmlFor="io-input">Given input <span className="font-normal text-zinc-600">(standard input)</span></label>
       <textarea id="io-input" value={p.input} onChange={(e) => p.onInput(e.target.value)} rows={4} placeholder="Leave empty if the program reads nothing" className={`${field} mt-1.5`} style={{ fontFamily: p.fontFamily }} spellCheck={false} />

@@ -11,6 +11,8 @@ import { StructureVisualizer } from "./structure-visualizer";
 import { ScopeOverlay } from "./scope-overlay";
 import { InheritanceView } from "./inheritance-view";
 import { DpView } from "./dp-view";
+import { MemoryView } from "./memory-view";
+import type { RawStep } from "@/lib/trace/interpret";
 import { buildDp } from "@/lib/trace/dp";
 import { describeIssue } from "@/lib/native/memory-issues";
 import { normalizeTrace } from "@/lib/trace/scope";
@@ -22,7 +24,8 @@ import { SpaceScrim } from "./space-scrim";
 import { PanelBoundary } from "./panel-boundary";
 import { LibraryPanel } from "./library-panel";
 import { IoAssistant, type IoRun } from "./io-assistant";
-import { NemotronAssistant, type AssistContext, type AssistMode } from "./nemotron-assistant";
+import { NemotronAssistant, type AssistContext, type AssistMode, type CheckResult } from "./nemotron-assistant";
+import { languageOfPath, type AiLanguage } from "@/lib/ai/languages";
 import { exampleById } from "@/lib/examples/catalog";
 import { InputStream } from "./input-stream";
 import { replayInput, type InputReplay } from "@/lib/trace/input";
@@ -107,9 +110,8 @@ export function Workspace({ monoFont }: { monoFont: string }) {
   /* The examples library sits under the file explorer in one sidebar, so added files show right above it. */
   const [examplesOpen, setExamplesOpen] = useState(true);
   const examplesRef = useRef<HTMLElement>(null);
-  const [rightTab, setRightTab] = useState<"visualize" | "io" | "classes" | "dp">("visualize");
+  const [rightTab, setRightTab] = useState<"visualize" | "io" | "classes" | "dp" | "memory">("visualize");
   /* Expected Output & Given Inputs: kept here so the code writer can use the same run. */
-  const [ioFile, setIoFile] = useState("");
   const [ioInput, setIoInput] = useState("");
   const [ioExpected, setIoExpected] = useState("");
   const [ioContext, setIoContext] = useState("");
@@ -380,15 +382,26 @@ export function Workspace({ monoFont }: { monoFont: string }) {
   );
 
   /* Expected Output & Given Inputs: run the current (unsaved) code with the given input. */
-  const javaFiles = project.files.filter((f) => f.path.endsWith(".java")).map((f) => f.path);
-  const ioPath = ioFile && javaFiles.includes(ioFile) ? ioFile : project.active && project.active.endsWith(".java") ? project.active : javaFiles[0] ?? "";
+  /* It runs the file that is open, and only that file: a Java file with main, or a Python, C, or C++
+     source file. Anything else gets a reason instead of running some other file. */
+  const ioPath = !active ? ""
+    : /\.(py|c|cpp|cc|cxx)$/.test(active.path) ? active.path
+      : active.path.endsWith(".java") && activeMain ? active.path
+        : "";
+  const ioName = active?.path.split("/").pop() ?? "";
+  const ioHint = !active ? "Open a file to run it here."
+    : ioPath ? null
+      : active.path.endsWith(".java") ? `${ioName} has no main method, so it can't run on its own. Open a file with public static void main(String[] args).`
+        : /\.(h|hpp|hh|hxx)$/.test(active.path) ? `${ioName} is a header, so it can't run on its own. Open the .c or .cpp file with main().`
+          : `${ioName} is not a program. Open a Java, Python, C, or C++ file to run it.`;
+  const ioLanguage = ioPath.endsWith(".py") ? "Python" : /\.c$/.test(ioPath) ? "C" : /\.(cpp|cc|cxx)$/.test(ioPath) ? "C++" : ioPath.endsWith(".java") ? "Java" : null;
   const ioSource = project.files.find((f) => f.path === ioPath)?.content ?? "";
   const runIo = async () => {
     if (!ioPath || job.current) return;
     setIoRunning(true);
     const input = ioInput;
     const source = ioSource;
-    const r = await execute("run", { stdin: input, mainClass: classFor(ioPath, source) });
+    const r = await execute("run", { stdin: input, mainClass: ioPath.endsWith(".java") ? classFor(ioPath, source) : ioPath });
     if (r) setIoRun({ result: r, input, file: ioPath, source });
     setIoRunning(false);
   };
@@ -399,12 +412,54 @@ export function Workspace({ monoFont }: { monoFont: string }) {
 
   /* What the code writer sees: the open file, any selection, and real run results only. */
   const diagnosticsText = (r: ExecResult | null | undefined) => (r?.diagnostics ?? []).map((d) => `${d.file}:${d.line}: ${d.message}`).join("\n") || undefined;
+  /* The language the assistant writes: the open file's, never a default (a header takes its folder's language). */
+  const aiLanguageFor = (path: string | null | undefined): AiLanguage | null => languageOfPath(path) ?? (nativeLang(path) as AiLanguage | null);
+  /*
+   * Other files that matter for a request, by relevance and bounded: headers and modules the file
+   * includes or imports, then sources next to it in the same language. At most 6 files and 60 KB;
+   * data files and unrelated folders are never sent.
+   */
+  const relatedFiles = (f: { path: string; content: string }, lang: AiLanguage) => {
+    const dir = f.path.includes("/") ? f.path.slice(0, f.path.lastIndexOf("/") + 1) : "";
+    const byPath = new Map(project.files.map((x) => [x.path, x]));
+    const wanted: string[] = [];
+    const push = (p: string) => { if (p !== f.path && byPath.has(p) && !wanted.includes(p)) wanted.push(p); };
+    if (lang === "c" || lang === "cpp") for (const m of f.content.matchAll(/#include\s+"([^"]+)"/g)) push(dir + m[1]);
+    if (lang === "python") for (const m of f.content.matchAll(/^\s*(?:from\s+(\.?[\w.]+)\s+import|import\s+([\w.]+))/gm)) {
+      const mod = (m[1] ?? m[2]).replace(/^\./, "").replace(/\./g, "/");
+      push(dir + mod + ".py"); push(mod + ".py"); push(dir + mod + "/__init__.py");
+    }
+    for (const x of project.files) if (x.path.startsWith(dir) && !x.path.slice(dir.length).includes("/") && aiLanguageFor(x.path) === lang) push(x.path);
+    const out: { path: string; content: string }[] = [];
+    let bytes = 0;
+    for (const p of wanted) {
+      const content = byPath.get(p)!.content.slice(0, 20_000);
+      if (out.length >= 6 || bytes + content.length > 60_000) break;
+      out.push({ path: p, content });
+      bytes += content.length;
+    }
+    return out;
+  };
   const assistContext = (mode: AssistMode): AssistContext => {
     const usesIo = mode === "explain_output" || mode === "compare_output";
     const filePath = usesIo && ioPath ? ioPath : project.active;
     const f = project.files.find((x) => x.path === filePath);
-    const r = usesIo ? ioRun?.result ?? null : result;
+    const lang = aiLanguageFor(f?.path);
+    /* Run evidence only from a run of this program: same language, same folder. */
+    const candidate = usesIo ? ioRun?.result ?? null : result;
+    const runDir = (p?: string | null) => (p && p.includes("/") ? p.slice(0, p.lastIndexOf("/") + 1) : "");
+    const sameProgram = !!candidate && !!f && (candidate.language ?? "java") === (lang === "cpp" || lang === "c" || lang === "python" ? lang : "java")
+      && (!candidate.entryPoint || runDir(candidate.entryPoint.includes("/") || /\.(py|c|cpp|cc|cxx)$/.test(candidate.entryPoint) ? candidate.entryPoint : f.path) === runDir(f.path));
+    const r = sameProgram ? candidate : null;
+    const evidence: string[] = [];
+    if (r?.exception) evidence.push(`Uncaught ${r.exception.type}${r.exception.message ? `: ${r.exception.message}` : ""}${r.exception.line ? ` at line ${r.exception.line}` : ""}`);
+    for (const i of r?.memoryIssues ?? []) evidence.push(`${i.tool}: ${i.title}${i.message ? ` (${i.message})` : ""}${i.line ? ` at ${i.file}:${i.line}` : ""}`);
+    const traceSummary = r?.trace ? `The visualizer recorded ${r.trace.stepCount} steps${r.trace.truncated ? " (stopped at the step limit)" : ""}.` : "";
+    if (traceSummary) evidence.push(traceSummary);
     return {
+      language: lang ?? undefined,
+      files: f && lang ? relatedFiles(f, lang) : undefined,
+      runtime: evidence.length ? evidence.join("\n") : undefined,
       file: f ? { path: f.path, content: f.content } : undefined,
       selection: !usesIo && selection.current.trim() ? selection.current : undefined,
       input: usesIo ? ioRun?.input ?? (ioInput || undefined) : project.stdin || undefined,
@@ -415,8 +470,31 @@ export function Workspace({ monoFont }: { monoFont: string }) {
         : undefined,
     };
   };
+  /* Applying replaces the file's text (unsaved, so Undo and Ctrl+Z work), or adds the file a translation created. */
   const applySuggestion = (path: string, code: string) =>
-    setProject((p) => ({ ...p, files: p.files.map((f) => (f.path === path ? { ...f, content: code } : f)), active: path, open: p.open.includes(path) ? p.open : [...p.open, path] }));
+    setProject((p) => (p.files.some((f) => f.path === path)
+      ? { ...p, files: p.files.map((f) => (f.path === path ? { ...f, content: code } : f)), active: path, open: p.open.includes(path) ? p.open : [...p.open, path] }
+      : persist(addFile(p, path, code))));
+  const discardSuggestion = (path: string) => setProject((p) => persist(deleteFile(p, path)));
+  /* The suggestion, compiled (or syntax-checked) in the sandbox with the rest of the project unchanged. */
+  const checkSuggestion = async (path: string, code: string): Promise<CheckResult> => {
+    const lang = aiLanguageFor(path) ?? aiLanguageFor(project.active);
+    const tool = lang === "python" ? "Python 3.12's syntax check" : lang === "c" ? "gcc 13 (C17)" : lang === "cpp" ? "g++ 13 (C++20)" : "javac (Java 21)";
+    if (!lang) return { ok: false, text: "Unknown language.", tool, unavailable: true };
+    const files = project.files.some((f) => f.path === path)
+      ? project.files.map((f) => ({ path: f.path, content: f.path === path ? code : f.content }))
+      : [...project.files.map((f) => ({ path: f.path, content: f.content })), { path, content: code }];
+    const source = /\.(h|hpp|hh|hxx)$/.test(path) && active && /\.(c|cpp|cc|cxx)$/.test(active.path) ? active.path : path;
+    try {
+      const started = await startExecution({ mode: "compile", files, language: lang, mainClass: lang === "java" ? null : source });
+      const done = await waitForExecution(started.id, () => {}, AbortSignal.timeout(90_000));
+      const res = done.result;
+      if (!res) return { ok: false, text: "The check did not finish.", tool, unavailable: true };
+      return { ok: res.status === "completed", text: diagnosticsText(res) || res.error || "", tool };
+    } catch (e) {
+      return { ok: false, text: e instanceof RunnerError && e.code === "runner_offline" ? "The code runner is offline, so the suggestion could not be checked." : "The suggestion could not be checked.", tool, unavailable: true };
+    }
+  };
 
   /* Stop asks the runner to kill the real process tree; polling then reports "cancelled". */
   const stop = useCallback(async () => {
@@ -873,14 +951,31 @@ export function Workspace({ monoFont }: { monoFont: string }) {
               style={{ width: `${rightPct * 100}%` }}
             >
               <div className="cv-glass-header flex shrink-0 gap-0.5 border-b border-white/10 px-3 pt-2" role="tablist" aria-label="Right panel">
-                {([["visualize", "Visualize"], ["classes", "Inheritance"], ["dp", "Dynamic programming"], ["io", "Expected Output & Given Inputs"]] as const).map(([t, label]) => (
+                {([["visualize", "Visualize"], ["memory", "Memory"], ["classes", "Inheritance"], ["dp", "Dynamic programming"], ["io", "Expected Output & Given Inputs"]] as const).map(([t, label]) => (
                   <button key={t} role="tab" aria-selected={rightTab === t} onClick={() => setRightTab(t)} className={`relative px-2.5 pb-2 pt-1 text-[12px] transition ${rightTab === t ? "text-zinc-100" : "text-zinc-500 hover:text-zinc-300"}`}>
                     {label}
                     {rightTab === t && <span className="absolute inset-x-2 bottom-0 h-px bg-[#6fe9ff]" />}
                   </button>
                 ))}
               </div>
-              {rightTab === "dp" ? (
+              {rightTab === "memory" ? (
+                <>
+                <div className="relative min-h-0 flex-1">
+                  <PanelBoundary name="Memory view">
+                    <MemoryView
+                      steps={(result?.trace?.steps as unknown as RawStep[] | undefined) ?? null}
+                      stepIndex={step}
+                      summary={(result?.trace as unknown as { memorySummary?: { leakedAtExit?: { id: number; size: number; file: string | null; line: number | null }[] | null } } | undefined)?.memorySummary}
+                      ended={!!result && result.status !== "running"}
+                      onJump={jumpTo}
+                      onSeek={(s) => { setPlaying(false); setStep(s); }}
+                      fontFamily={monoFont}
+                    />
+                  </PanelBoundary>
+                </div>
+                {playback}
+                </>
+              ) : rightTab === "dp" ? (
                 <>
                 <div className="relative min-h-0 flex-1">
                   <PanelBoundary name="Dynamic programming view">
@@ -932,9 +1027,9 @@ export function Workspace({ monoFont }: { monoFont: string }) {
               ) : rightTab === "io" ? (
                 <div className="min-h-0 flex-1">
                   <IoAssistant
-                    files={javaFiles}
                     file={ioPath}
-                    onFile={setIoFile}
+                    language={ioLanguage}
+                    hint={ioHint}
                     input={ioInput}
                     onInput={setIoInput}
                     expected={ioExpected}
@@ -1039,6 +1134,9 @@ export function Workspace({ monoFont }: { monoFont: string }) {
         getContext={assistContext}
         getFile={(path) => project.files.find((f) => f.path === path)?.content ?? null}
         onApply={applySuggestion}
+        onDiscard={discardSuggestion}
+        onCheck={checkSuggestion}
+        target={{ path: project.active, language: aiLanguageFor(project.active) }}
         request={assistRequest}
         fontFamily={monoFont}
       />

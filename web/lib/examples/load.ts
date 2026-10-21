@@ -38,7 +38,7 @@ export async function exampleFiles(ex: Example, copy = 1, override?: Record<stri
   );
   const entry = `examples/${slug}/${ex.file}`;
   /* Python programs are run by file; Java by class name. */
-  const mainClass = ex.file.endsWith(".py") ? entry : `examples.${slug}.${ex.file.replace(/\.java$/, "").replace(/\//g, ".")}`;
+  const mainClass = /\.(py|c|cpp|cc|cxx)$/.test(ex.file) ? entry : `examples.${slug}.${ex.file.replace(/\.java$/, "").replace(/\//g, ".")}`;
   return { files, entry, mainClass, slug };
 }
 
