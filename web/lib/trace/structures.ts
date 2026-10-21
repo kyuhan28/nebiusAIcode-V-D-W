@@ -273,27 +273,47 @@ const TO = ["to", "v", "dst", "dest", "target"];
 type Adj = { adj: { to: number; weight: number | null }[][]; directed: boolean; matrix: number[][] | null; edgeIds: Map<string, string> };
 
 /** Every row of a 2D numeric array, with each row's real length (jagged arrays allowed). */
-function rows2d(heap: Record<string, HeapObj>, v: Val | undefined): { id: string; rows: number[][] } | null {
+type Cell = number | string;
+
+/** A cell of a 2D collection: a number, or the text of a string, char, boolean, or null. */
+function cellOf(x: Val, python: boolean): Cell | undefined {
+  if (x.t === "null") return python ? "None" : "null";
+  if (typeof x.v === "number") return x.v as number;
+  if (typeof x.v === "string") return x.v as string;
+  if (typeof x.v === "boolean") return python ? (x.v ? "True" : "False") : String(x.v);
+  return undefined;
+}
+
+/**
+ * A 2D collection, or null: any list or array whose items are lists or arrays of simple values.
+ * That covers int[][], String[][], char[][], List<List<String>>, ArrayList<int[]>, and Python lists of
+ * lists (NumPy 2-D arrays are recorded the same way). Rows may differ in length. An outer collection
+ * with no rows yet counts only when allowEmpty is set: for a variable already known to be 2D, so an
+ * empty List<Integer> is never mistaken for a grid.
+ */
+function rows2d(heap: Record<string, HeapObj>, v: Val | undefined, allowEmpty = false): { id: string; rows: Cell[][] } | null {
   if (!v || v.t !== "ref") return null;
   const o = heap[v.id as string];
-  /* Python: a list of lists of numbers (numpy 2-D arrays are recorded the same way). */
-  if (o && o.t === "list" && o.cls === "list") {
-    const rows: number[][] = [];
-    for (const it of o.items) {
-      const r = it.t === "ref" ? heap[it.id as string] : undefined;
-      if (!r || r.t !== "list" || r.cls !== "list" || !r.items.every((x) => typeof x.v === "number")) return null;
-      rows.push(r.items.map((x) => x.v as number));
-    }
-    return rows.length ? { id: v.id as string, rows } : null;
-  }
-  if (!o || o.t !== "array" || !/\[\]$/.test(o.of) || !/^(int|long|short|byte|double|float|char)\[\]$/.test(o.of)) return null;
-  const rows: number[][] = [];
+  if (!o || (o.t !== "list" && o.t !== "array")) return null;
+  const python = o.t === "list" && o.cls === "list";
+  /* Two-dimensional by contents: its items are arrays or lists (Java int[][], C int[3][4], C++
+     vector<vector<int>>). A null row only counts in a declared array of arrays (new int[3][]), so a
+     String[] full of nulls stays a one-dimensional array. */
+  const arrayOfArrays = o.t === "array" && /\]$/.test(o.of);
+  const rows: Cell[][] = [];
   for (const it of o.items) {
-    if (it.t === "null") { rows.push([]); continue; }
+    if (it.t === "null" && arrayOfArrays) { rows.push([]); continue; }
     const r = it.t === "ref" ? heap[it.id as string] : undefined;
-    if (!r || r.t !== "array") return null;
-    rows.push(r.items.map((x) => (typeof x.v === "number" ? (x.v as number) : typeof x.v === "string" ? (x.v as string).charCodeAt(0) : 0)));
+    if (!r || (r.t !== "list" && r.t !== "array")) return null;
+    const row: Cell[] = [];
+    for (const x of r.items) {
+      const c = cellOf(x, python);
+      if (c === undefined) return null;  /* rows of objects are drawn by other views */
+      row.push(c);
+    }
+    rows.push(row);
   }
+  if (!rows.length && !allowEmpty) return null;
   return { id: v.id as string, rows };
 }
 
@@ -489,17 +509,19 @@ function evalIndex(expr: string, ints: Record<string, number>): number | null {
 }
 
 const fmt = (x: number) => (x >= 2147483647 ? "∞" : Number.isInteger(x) ? String(x) : x.toFixed(2));
+/** A grid cell's label: numbers as fmt shows them, text (strings, chars, booleans, null) as it is. */
+const cellText = (x: Cell) => (typeof x === "number" ? fmt(x) : x);
 
 function gridDetector(name: string): Detector {
-  let prev: number[][] | null = null;
+  let prev: Cell[][] | null = null;
   let arrayId: string | null = null;
   let visited = new Set<string>();
   return {
     name,
     kind: "grid",
     view: ({ step, heap, line }) => {
-      let found: { id: string; rows: number[][] } | null = null;
-      for (const [nm, v] of roots(step)) if (nm === name && (found = rows2d(heap, v))) break;
+      let found: { id: string; rows: Cell[][] } | null = null;
+      for (const [nm, v] of roots(step)) if (nm === name && (found = rows2d(heap, v, true))) break;
       if (!found) return null;
       const m = found.rows;
       const lengths = m.map((r) => r.length);
@@ -521,6 +543,14 @@ function gridDetector(name: string): Detector {
         if (/^\s*(=(?!=)|\+=|-=|\*=|\/=|%=|\+\+|--)/.test(after) && target === null) target = `${r},${c}`;
         else if (!reads.includes(`${r},${c}`)) reads.push(`${r},${c}`);
       }
+      /* Java lists: name.get(r).get(c) reads a cell, name.get(r).set(c, ...) writes one. */
+      const listCell = new RegExp(`\\b${name}\\s*\\.\\s*get\\(\\s*([^()]+?)\\s*\\)\\s*\\.\\s*(get|set)\\(\\s*([^,()]+?)\\s*[,)]`, "g");
+      for (const hit of (line ?? "").matchAll(listCell)) {
+        const r = evalIndex(hit[1], ints), c = evalIndex(hit[3], ints);
+        if (r === null || c === null || r < 0 || r >= m.length || c < 0 || c >= lengths[r]) continue;
+        if (hit[2] === "set" && target === null) target = `${r},${c}`;
+        else if (!reads.includes(`${r},${c}`)) reads.push(`${r},${c}`);
+      }
       const changed = new Set<string>();
       if (prev) m.forEach((row, r) => row.forEach((x, c) => prev![r]?.[c] !== x && changed.add(`${r},${c}`)));
       prev = m.map((row) => [...row]);
@@ -529,12 +559,12 @@ function gridDetector(name: string): Detector {
       m.forEach((row, r) =>
         row.forEach((x, c) => {
           const key = `${r},${c}`;
-          nodes.push({ id: `g${key}`, label: fmt(x), state: active.has(key) ? "current" : changed.has(key) ? "special" : visited.has(key) ? "visited" : "idle" });
+          nodes.push({ id: `g${key}`, label: cellText(x), state: active.has(key) ? "current" : changed.has(key) ? "special" : visited.has(key) ? "visited" : "idle" });
         }),
       );
       for (const k of active) visited.add(k);
       const at = (k: string) => { const [r, c] = k.split(","); return `${name}[${r}][${c}]`; };
-      const value = (k: string) => { const [r, c] = k.split(",").map(Number); return fmt(m[r][c]); };
+      const value = (k: string) => { const [r, c] = k.split(",").map(Number); return cellText(m[r][c]); };
       const shape = lengths.every((l) => l === cols) ? `${m.length} row${m.length === 1 ? "" : "s"} × ${cols} column${cols === 1 ? "" : "s"}` : `${m.length} rows of different lengths`;
       const caption =
         cells === 0 ? `${name} is empty (${m.length} × ${cols})`
@@ -949,17 +979,24 @@ export function detectExtraLayers(steps: RawStep[], heaps: Record<string, HeapOb
       const h = heap[v.id as string];
       if (!h) return;
       let det: Detector | null = null;
+      const title = labelOf(s, heap, nm, v, depth, classes);
+      /* An empty collection does not say what it will hold: a list of lists starts out as []. Decide from its
+         declared type (List<List<...>>, T[][]), or wait for a step where it has contents. */
+      const empty = (h.t === "list" || h.t === "array") && h.items.length === 0;
+      const nested = /:\s*(?:java\.util\.)?(?:List|ArrayList|LinkedList|Vector)<\s*(?:java\.util\.)?(?:List|ArrayList|LinkedList|Vector)<|\[\]\s*\[\]|:\s*(?:java\.util\.)?(?:List|ArrayList|LinkedList|Vector)<[^<>]*\[\]>/.test(title);
       if (h.t === "map") det = mapDetector(nm);
       else if (h.t === "set") det = setDetector(nm);
       else if (h.t === "stack" || ((h.t === "deque" || h.t === "list") && /stack|^(stk|st|s)$/i.test(nm))) det = seqDetector("stack", { name: nm });
       else if ((h.t === "deque" || h.t === "list") && /queue|^(q|line|waiting)$/i.test(nm)) det = seqDetector("queue", { name: nm });
       else if (h.t === "list" && h.cls === "java.util.LinkedList") det = jdkListDetector(nm);
       else if (rows2d(heap, v) && !MATRIX_GRAPH.test(nm)) det = gridDetector(nm);
+      else if (empty && nested && !MATRIX_GRAPH.test(nm)) det = gridDetector(nm);
+      else if (empty) return;  /* decided at a later step, once it has contents */
       else if (flatItems(h)) det = arrayDetector(nm, indexVarsFor(nm, sources));
       if (!det) return;
       ids.add(v.id as string);
       names.add(nm);
-      out.push({ key: `v:${nm}`, name: nm, title: labelOf(s, heap, nm, v, depth, classes), detector: det });
+      out.push({ key: `v:${nm}`, name: nm, title, detector: det });
     };
     /* Outermost frames first, so a structure is named after the variable that owns it. */
     for (let depth = s.stack.length - 1; depth >= 0; depth--) for (const [nm, v] of Object.entries(s.stack[depth].locals)) consider(nm, v, depth);

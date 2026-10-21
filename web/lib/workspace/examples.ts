@@ -20,12 +20,13 @@ export function planExample(p: Project, built: ExampleFiles): ExamplePlan {
 /**
  * The project with the example's files added (and `replace` paths overwritten, only when the user
  * chose that), its entry file showing in the current editor tab, and its sample input filled in
- * when the Input tab is empty. Null when it would go over the file limit; nothing changes then.
+ * as its entry file's own given input. Null when it would go over the file limit; nothing changes then.
  */
 export function withExample(p: Project, built: ExampleFiles, stdin: string | undefined, replace: Set<string> = new Set()): { project: Project; keptInput: boolean } | null {
   const next = addFiles(p, built.files, { replace, saved: true });
   if (!next) return null;
-  const keptInput = !!stdin && !!p.stdin.trim() && p.stdin !== stdin;
-  const withInput = stdin && !p.stdin.trim() ? { ...next, stdin } : next;
+  /* The example's sample input belongs to its own entry file: other files keep theirs. */
+  const keptInput = false;
+  const withInput = stdin ? { ...next, inputs: { ...next.inputs, [built.entry]: stdin } } : next;
   return { project: showInCurrentTab(withInput, built.entry), keptInput };
 }

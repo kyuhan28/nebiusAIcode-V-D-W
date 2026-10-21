@@ -8,7 +8,10 @@ export type Project = {
   open: string[];
   active: string | null;
   mainClass: string | null;
+  /** Older projects' single shared input; kept only so their saved data still loads. Not used for running. */
   stdin: string;
+  /** Each program file's own given input, by path: what Visualize and "Run with this input" feed it. */
+  inputs: Record<string, string>;
   fontSize: number;
 };
 
@@ -49,6 +52,7 @@ export function defaultProject(): Project {
     active: "Main.java",
     mainClass: null,
     stdin: "",
+    inputs: {},
     fontSize: 14,
   };
 }
@@ -195,6 +199,7 @@ export function renameFolder(p: Project, from: string, to: string): Project {
     folders: [...new Set(p.folders.map(move))].sort(),
     open: p.open.map(move),
     active: p.active ? move(p.active) : null,
+    inputs: Object.fromEntries(Object.entries(p.inputs).map(([k, v]) => [move(k), v])),
   };
 }
 
@@ -206,7 +211,7 @@ export function deleteFolder(p: Project, folder: string): Project {
   const files = p.files.filter((f) => keep(f.path));
   const open = p.open.filter(keep);
   const moved = p.active && !keep(p.active) ? landing(files, open, p.active) : { open, active: p.active };
-  return { ...p, files, folders: p.folders.filter(keep), ...moved };
+  return { ...p, files, folders: p.folders.filter(keep), ...moved, inputs: Object.fromEntries(Object.entries(p.inputs).filter(([k]) => keep(k))) };
 }
 
 /** The folder a path lives in, or "" at the top level. */
@@ -221,6 +226,8 @@ export function renameFile(p: Project, from: string, to: string): Project {
     files: p.files.map((f) => (f.path === from ? { ...f, path: to } : f)).sort((a, b) => a.path.localeCompare(b.path)),
     open: p.open.map((o) => (o === from ? to : o)),
     active: p.active === from ? to : p.active,
+    /* A renamed or moved file keeps its given input. */
+    inputs: Object.fromEntries(Object.entries(p.inputs).map(([k, v]) => [k === from ? to : k, v])),
   };
 }
 
@@ -238,7 +245,9 @@ export function deleteFile(p: Project, path: string): Project {
   const files = p.files.filter((f) => f.path !== path);
   const open = p.open.filter((o) => o !== path);
   const moved = p.active === path ? landing(files, open, path) : { open, active: p.active };
-  return { ...p, files, folders: keepParent(p.folders, path), ...moved };
+  const { [path]: _gone, ...inputs } = p.inputs;
+  void _gone;
+  return { ...p, files, folders: keepParent(p.folders, path), ...moved, inputs };
 }
 
 /**
@@ -280,6 +289,7 @@ export function serialize(p: Project): string {
     active: p.active,
     mainClass: p.mainClass,
     stdin: p.stdin,
+    inputs: p.inputs,
     fontSize: p.fontSize,
   });
 }
@@ -306,6 +316,8 @@ export function deserialize(text: string | null): Project | null {
       active: paths.has(d.active) ? d.active : (open[0] ?? files[0].path),
       mainClass: typeof d.mainClass === "string" ? d.mainClass : null,
       stdin: typeof d.stdin === "string" ? d.stdin : "",
+      /* Only inputs for files that still exist. */
+      inputs: d.inputs && typeof d.inputs === "object" ? Object.fromEntries(Object.entries(d.inputs as Record<string, unknown>).filter((e): e is [string, string] => typeof e[1] === "string" && paths.has(e[0]))) : {},
       fontSize: typeof d.fontSize === "number" ? Math.min(22, Math.max(11, d.fontSize)) : 14,
     };
   } catch {

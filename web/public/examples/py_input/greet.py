@@ -1,6 +1,7 @@
 """Reading input: input() returns one line of text; int() and float() convert it.
 
-The Input tab feeds the program. Try changing it, or delete a line to see EOFError.
+Press Run and type your answers in the terminal. For Visualize, put them in Given input
+(Expected Output & Given Inputs tab); delete a line there to see EOFError.
 """
 name = input("What is your name? ")
 age = int(input("How old are you? "))

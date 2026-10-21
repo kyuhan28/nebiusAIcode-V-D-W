@@ -7,7 +7,7 @@ export type Example = {
   summary: string;
   complexity: string;
   visual: "tree" | "list" | "graph" | "map" | "array" | "stack" | "grid" | "points" | "input" | "none";
-  /** Standard input the example expects; filled into the Input tab when it opens. */
+  /** Standard input the example expects; saved as its entry file's given input when it is added. */
   stdin?: string;
   /**
    * Multi-file examples: paths under public/examples/<dir>/, already written with packages under
@@ -226,7 +226,7 @@ export const EXAMPLES: Example[] = [
     files: ["hello.py"],
   },
   {
-    ...e("PyInput", "Reading input in Python", "Python", "input(), int(), split(), and map(), fed from the Input tab.", "one input() per line", "input"),
+    ...e("PyInput", "Reading input in Python", "Python", "input(), int(), split(), and map(): type answers in the terminal, or give them for Visualize.", "one input() per line", "input"),
     file: "greet.py",
     dir: "py_input",
     files: ["greet.py"],

@@ -55,6 +55,8 @@ export async function sanitizedExecution(req: Request) {
     mainClass: typeof b.mainClass === "string" ? b.mainClass : undefined,
     language: ["java", "python", "c", "cpp"].includes(b.language as string) ? b.language : undefined,
     stdin: typeof b.stdin === "string" ? b.stdin : "",
+    /* A run whose input stays open for the terminal (only runs; the runner ignores it otherwise). */
+    interactive: b.interactive === true ? true : undefined,
   });
 }
 

@@ -56,7 +56,7 @@ export function IoAssistant(p: Props) {
           : p.hint}
       </p>
 
-      <label className="mt-4 block text-[12px] font-medium text-zinc-500" htmlFor="io-input">Given input <span className="font-normal text-zinc-600">(standard input)</span></label>
+      <label className="mt-4 block text-[12px] font-medium text-zinc-500" htmlFor="io-input">Given input <span className="font-normal text-zinc-600">(optional, standard input)</span></label>
       <textarea id="io-input" value={p.input} onChange={(e) => p.onInput(e.target.value)} rows={4} placeholder="Leave empty if the program reads nothing" className={`${field} mt-1.5`} style={{ fontFamily: p.fontFamily }} spellCheck={false} />
 
       <label className="mt-4 block text-[12px] font-medium text-zinc-500" htmlFor="io-expected">Expected output <span className="font-normal text-zinc-600">(optional)</span></label>
@@ -69,7 +69,7 @@ export function IoAssistant(p: Props) {
         {p.running ? (
           <button onClick={p.onStop} className="h-8 rounded-full bg-[#ff5d73] px-4 text-[13px] font-semibold text-black">Stop</button>
         ) : (
-          <button onClick={p.onRun} disabled={!p.file} className="h-8 rounded-full bg-zinc-50 px-4 text-[13px] font-semibold text-black transition hover:bg-white disabled:opacity-40">Run with this input</button>
+          <button onClick={p.onRun} disabled={!p.file} className="h-8 rounded-full bg-zinc-50 px-4 text-[13px] font-semibold text-black transition hover:bg-white disabled:opacity-40">{p.input.trim() ? "Run with this input" : "Run"}</button>
         )}
         <button onClick={p.onExplain} disabled={p.running} className="h-8 rounded-full border border-[#76b900]/50 px-4 text-[13px] text-[#a6e22e] transition hover:border-[#76b900] hover:bg-[#76b900]/10 disabled:opacity-40">
           {r ? (comparison && !comparison.match ? "Ask Nemotron why they differ" : "Ask Nemotron to explain") : "Ask Nemotron"}

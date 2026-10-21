@@ -20,6 +20,7 @@ EXPECTED = {
   "BinarySearchExample": ["Index of 23: 5", "Index of 7: -1"],
   "BubbleSortExample": ["Sorted: [1, 2, 4, 5, 8]"],
   "MergeSortExample": ["Sorted: [3, 9, 10, 27, 38, 43, 82]"],
+  "PermutationsExample": ["[1, 2, 3]", "[1, 3, 2]", "[2, 1, 3]", "[2, 3, 1]", "[3, 1, 2]", "[3, 2, 1]", "6 permutations"],
   "QuickSortExample": ["Sorted: [1, 5, 7, 8, 9, 10]"],
   "FactorialExample": ["5! recursively = 120", "10! with a loop = 3628800", "20! = 2432902008176640000"],
   "FibonacciExample": ["fib(10) by plain recursion = 55 (177 calls)", "fib(50) with memoization = 12586269025", "fib(12) bottom-up = 144"],

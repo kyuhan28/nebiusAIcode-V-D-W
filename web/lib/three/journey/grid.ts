@@ -18,6 +18,14 @@ export const JOURNEY_GRID: GridLook = { minor: "#ffffff", major: "#ffffff", cell
  * An endless-looking floor grid. Lines are computed in world space, so the plane can
  * follow the camera without the lines sliding, and they fade out with distance.
  */
+/**
+ * The floor's height so that everything drawn stays above it: its usual height, or lower, keeping
+ * `clearance` below the lowest point, when a tall table, matrix, tree, or long array reaches down.
+ */
+export function floorBelow(lowestY: number, usual: number, clearance: number): number {
+  return Math.min(usual, lowestY - clearance);
+}
+
 export function createInfiniteGrid(y: number, look: GridLook = JOURNEY_GRID) {
   const material = new THREE.ShaderMaterial({
     transparent: true,

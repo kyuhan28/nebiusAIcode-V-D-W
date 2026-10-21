@@ -153,7 +153,7 @@ public final class Executor {
   private void run(Workspace ws, String main, byte[] stdin, Job job, Map<String, Object> res) throws IOException {
     List<String> cmd = isolate(userJvm(ws, main), ws, job, "512m", cfg.runTimeoutMs() / 1000 + 2, false);
     /* Programs start in the project folder, so relative paths such as data/input.txt find project files (as in Python). */
-    ChildProcess.Result r = ChildProcess.run(cmd, ws.src, stdin, cfg.runTimeoutMs(), cfg.maxOutputBytes(), job);
+    ChildProcess.Result r = ChildProcess.run(cmd, ws.src, stdin, runTimeoutMs(job), cfg.maxOutputBytes(), job, job.interactive);
     res.put("stdout", r.stdout());
     res.put("stderr", r.stderr());
     res.put("stdoutTruncated", r.stdoutTruncated());
@@ -414,9 +414,11 @@ public final class Executor {
 
     Path result = ws.root.resolve("py-result.json");
     List<String> cmd = new ArrayList<>(py);
+    /* Interactive: unbuffered, so every print reaches the terminal at once, not when the buffer fills. */
+    if (job.interactive) cmd.add(1, "-u");
     cmd.addAll(List.of("run", path(ws, ws.src), entry, path(ws, result)));
     byte[] stdin = req.stdin() == null ? new byte[0] : req.stdin().getBytes(StandardCharsets.UTF_8);
-    ChildProcess.Result r = ChildProcess.run(isolate(cmd, ws, job, "512m", cfg.runTimeoutMs() / 1000 + 2, false), ws.root, stdin, cfg.runTimeoutMs(), cfg.maxOutputBytes(), job);
+    ChildProcess.Result r = ChildProcess.run(isolate(cmd, ws, job, "512m", cfg.runTimeoutMs() / 1000 + 2, false), ws.root, stdin, runTimeoutMs(job), cfg.maxOutputBytes(), job, job.interactive);
     res.put("stdout", r.stdout());
     res.put("stderr", r.stderr());
     res.put("stdoutTruncated", r.stdoutTruncated());
@@ -562,7 +564,7 @@ public final class Executor {
         "ASAN_OPTIONS=detect_leaks=1:malloc_limit_mb=512:hard_rss_limit_mb=768:allocator_may_return_null=1:detect_stack_use_after_return=0:color=never",
         "UBSAN_OPTIONS=print_stacktrace=1:color=never", "LSAN_OPTIONS=exitcode=23", path(ws, program));
     byte[] stdin = stdinText.getBytes(StandardCharsets.UTF_8);
-    ChildProcess.Result r = ChildProcess.run(isolate(run, ws, job, "1g", cfg.runTimeoutMs() / 1000 + 2, false), ws.src, stdin, cfg.runTimeoutMs(), cfg.maxOutputBytes(), job);
+    ChildProcess.Result r = ChildProcess.run(isolate(run, ws, job, "1g", cfg.runTimeoutMs() / 1000 + 2, false), ws.src, stdin, runTimeoutMs(job), cfg.maxOutputBytes(), job, job.interactive);
     res.put("stdout", r.stdout());
     res.put("stderr", r.stderr());
     res.put("stdoutTruncated", r.stdoutTruncated());
@@ -636,6 +638,17 @@ public final class Executor {
   private List<String> srcPrefixes(Workspace ws) {
     return List.of(path(ws, ws.src) + "/", ws.src.toString() + "/", ws.src.toAbsolutePath().normalize() + "/");
   }
+
+  /*
+   * Interactive runs wait for typing, so their wall-clock limit is longer (RUNNER_INTERACTIVE_TIMEOUT_MS,
+   * 5 minutes by default). Their CPU-time limit is the usual one (set by isolate), so a busy loop still
+   * stops after the normal run time of CPU.
+   */
+  private static final int INTERACTIVE_TIMEOUT_MS = parseIntOr(System.getenv("RUNNER_INTERACTIVE_TIMEOUT_MS"), 300_000);
+  private static int parseIntOr(String s, int fallback) {
+    try { return s == null ? fallback : Integer.parseInt(s.trim()); } catch (NumberFormatException e) { return fallback; }
+  }
+  private int runTimeoutMs(Job job) { return job.interactive ? INTERACTIVE_TIMEOUT_MS : cfg.runTimeoutMs(); }
 
   static Map<String, Object> parseException(String stderr) {
     Matcher m = EXCEPTION.matcher(stderr);

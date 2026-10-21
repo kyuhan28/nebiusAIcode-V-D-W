@@ -3,7 +3,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { CSS2DObject, CSS2DRenderer } from "three/examples/jsm/renderers/CSS2DRenderer.js";
 import { addEnvironment, createComposer, createRenderer, disposeObject } from "./core";
 import { createIdentifierLabel } from "./identifier-label";
-import { createInfiniteGrid } from "./journey/grid";
+import { createInfiniteGrid, floorBelow } from "./journey/grid";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import { EdgeVisual, JOURNEY, NodeVisual, boxKit, edgeGeometry, nodeMaterial, sphereKit } from "./journey/visuals";
 import type { StructureView } from "../trace/structures";
@@ -273,8 +273,12 @@ export function createStructureScene(container: HTMLElement, fontFamily: string)
   const envMap = addEnvironment(renderer, scene);
   scene.environmentIntensity = 0.6;
   /* The same white grid floor as the landing page, under the structures. */
-  const grid = createInfiniteGrid(-4.2);
+  const FLOOR_Y = -4.2;
+  const grid = createInfiniteGrid(FLOOR_Y);
   scene.add(grid.mesh);
+  /* Where the floor is heading: it drops under tall content, see keepAboveFloor. */
+  let floorGoal = FLOOR_Y;
+  const stillFloor = typeof window !== "undefined" && !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
 
   const spheres = sphereKit(0.44);
   const treeSpheres = sphereKit(0.44, false);
@@ -713,6 +717,22 @@ export function createStructureScene(container: HTMLElement, fontFamily: string)
     }
   }
 
+  /*
+   * The floor stays under everything drawn. When a tall table, matrix, or tree reaches down to it, it
+   * drops to stay 1 unit below the lowest point. It never rises during a run, so it does not bob as a
+   * structure grows and shrinks; it returns to its usual height when the scene is cleared.
+   */
+  const contentBox = new THREE.Box3();
+  function keepAboveFloor() {
+    if (layers.size === 0) { floorGoal = FLOOR_Y; return; }
+    contentBox.makeEmpty();
+    layers.forEach((l) => {
+      const box = l.localBounds();
+      if (!box.isEmpty()) contentBox.union(box.clone().translate(l.offset));
+    });
+    if (!contentBox.isEmpty()) floorGoal = Math.min(floorGoal, floorBelow(contentBox.min.y, FLOOR_Y, 1));
+  }
+
   function setViews(list: { key: string; title?: string; view: StructureView | null }[]) {
     const keys = new Set(list.map((x) => x.key));
     layers.forEach((l, key) => {
@@ -724,6 +744,7 @@ export function createStructureScene(container: HTMLElement, fontFamily: string)
       l.setView(item.view, item.title ?? "");
     }
     arrange();
+    keepAboveFloor();
     /* Only the first content is framed automatically; from then on the camera stays where it is. */
     if (!framed) framed = fit(true);
   }
@@ -778,6 +799,8 @@ export function createStructureScene(container: HTMLElement, fontFamily: string)
     }
     controls.update();
     grid.update(camera, 1, 80);
+    /* Glide to the floor's new height (straight there with reduced motion). */
+    grid.mesh.position.y += (floorGoal - grid.mesh.position.y) * (stillFloor ? 1 : 1 - Math.exp(-dt * 4));
     composer.render();
     labels.render(scene, camera);
   };

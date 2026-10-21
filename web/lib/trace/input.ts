@@ -104,7 +104,9 @@ export function replayInput(trace: { io?: IoEvent[]; ioTruncated?: boolean; stdi
     const src = lineText(e);
     const call = new RegExp(`([\\w.\\]\\)]+)\\s*\\.\\s*${e.op}\\s*\\(`).exec(src);
     const shownArgs = e.args.map((a) => (a === null ? "null" : /parse|valueOf|<init>|useDelimiter/.test(e.op) ? JSON.stringify(a) : a)).join(", ");
-    const label = e.op === "<init>" ? `new StringTokenizer(${shownArgs})` : `${call ? call[1] : e.cls.split(".").pop()}.${e.op}(${shownArgs})`;
+    /* Python's built-ins are called without a receiver: input("Name: "), as written in the program. */
+    const label = e.cls === "builtins" ? `${e.op}(${e.args.map((x) => JSON.stringify(x)).join(", ")})`
+      : e.op === "<init>" ? `new StringTokenizer(${shownArgs})` : `${call ? call[1] : e.cls.split(".").pop()}.${e.op}(${shownArgs})`;
     const assign = /^\s*(?:final\s+)?(?:[\w.<>[\]]+\s+)?([A-Za-z_]\w*)\s*(\+=|-=|\*=|=)(?!=)/.exec(src);
     const variable = assign && lastOnLine.get(`${e.step}:${e.line}`) === i && e.op !== "<init>" ? (assign[2] === "=" ? assign[1] : `${assign[1]} ${assign[2]}`) : null;
     const base = { ...e, label, variable, from: null as number | null, note: null as string | null, tokenizer: undefined as InputOp["tokenizer"] };

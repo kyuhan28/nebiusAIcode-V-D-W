@@ -1,6 +1,6 @@
 # codeviz
 
-**An AI code visualizer, debugger, and writer for Java, Python, C, and C++.**
+**An AI code visualizer, debugger, and writer for Java, Python, C, and C++, with a coding assistant powered by NVIDIA Nemotron.**
 
 codeviz runs your program for real, in a sandbox, records every step, and lets you play the execution forward and backward. You can watch variables change, data structures take shape in 3D, call stacks grow and shrink, and (for C and C++) memory get allocated, pointed at, and freed. A built-in NVIDIA Nemotron assistant can explain code, find bugs, complete TODOs, and suggest fixes. It checks every suggestion with the real compiler before you apply it.
 
@@ -14,12 +14,13 @@ Everything you see comes from an actual run of your code. Nothing is simulated f
 - [How it works](#how-it-works)
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
-- [The Nemotron assistant](#the-nemotron-assistant)
+- [NVIDIA Nemotron and Nebius Token Factory](#nvidia-nemotron-and-nebius-token-factory)
 - [Security](#security)
 - [Running the tests](#running-the-tests)
 - [Troubleshooting](#troubleshooting)
 - [Limitations](#limitations)
 - [Project layout](#project-layout)
+- [License](#license)
 
 ---
 
@@ -135,7 +136,7 @@ The web app still runs separately with `npm run dev`.
 | `NVIDIA_NEMOTRON_MODEL` | no | Preferred model; the app falls back through known Nemotron models and NVIDIA's live catalog |
 | `NVIDIA_NEMOTRON_FALLBACK_MODELS` | no | Comma-separated extra models to try |
 | `NVIDIA_NEMOTRON_TIMEOUT_MS` | no | Request timeout (default 90000) |
-| `NVIDIA_API_BASE_URL` | no | Defaults to `https://integrate.api.nvidia.com/v1` |
+| `NVIDIA_API_BASE_URL` | no | Defaults to `https://integrate.api.nvidia.com/v1`; set to `https://api.tokenfactory.nebius.com/v1` for Nebius Token Factory |
 
 `.env.local` is read by the server only. Never commit it.
 
@@ -160,20 +161,54 @@ The complete list, including file and input size limits, is in [`runner/README.m
 
 ---
 
-## The Nemotron assistant
+## NVIDIA Nemotron and Nebius Token Factory
 
-Open it with the green button in the bottom-right corner of the workspace. It works on the file you have open, in that file's language. The panel says exactly which language and file it is writing for before anything is sent.
+### How we use NVIDIA Nemotron
 
-**Actions:** Complete the TODO, Explain this code, Find the bug, Suggest a fix, Explain the compiler error, Improve or refactor, Generate tests, Explain the algorithm step by step, complexity and edge-case questions, and free-form questions.
+CodeVIZ's coding assistant is powered by **NVIDIA Nemotron** open models. Open it with the green button in the bottom-right corner of the workspace. It works on the file you have open, in that file's language, and says exactly which language and file it is writing for before anything is sent.
 
-**How a suggestion reaches your code:**
+**What Nemotron does in the app:** Complete the TODO, Explain this code, Find the bug, Suggest a fix, Explain the compiler error, Improve or refactor, Generate tests, Explain the algorithm step by step, complexity and edge-case analysis, and free-form questions about your code.
 
-1. The browser sends the open file (including unsaved edits) and up to 6 related files: headers it `#include`s, modules it imports, and same-folder sources. It also sends evidence from the last run of *this* program: errors, exceptions, and sanitizer findings.
-2. The server tells the model which language and toolchain it is writing for, and accepts code back only in that language.
-3. The suggestion is **compiled (or syntax-checked) in the sandbox** before you see an Apply button. If it fails, you see the real compiler errors and can send them back to Nemotron, at most twice.
-4. Nothing changes until you review the diff and apply it, and Undo restores your version.
+**Models.** The app asks for `nvidia/nemotron-3-super-120b-a12b` (Nemotron 3 Super) first. It falls back through other Nemotron models (`llama-3.3-nemotron-super-49b-v1.5`, `nvidia-nemotron-nano-9b-v2`, `llama-3.1-nemotron-ultra-253b-v1`, `nemotron-3-ultra-550b-a55b`), then through whatever Nemotron models the provider's live `/v1/models` catalog lists, and remembers the one that answered. Set `NVIDIA_NEMOTRON_MODEL` to choose a specific model.
 
-Get an API key at [build.nvidia.com](https://build.nvidia.com) and put it in `web/.env.local` as `NVIDIA_NEMOTRON_API_KEY`. The key stays on the server: it is never sent to the browser, written to logs, or passed into sandboxes.
+**How a request works:**
+
+1. The browser sends the open file (including unsaved edits) and up to 6 related files: headers it `#include`s, modules it imports, and same-folder sources. It also sends evidence from the last run of *this* program: compiler errors, exceptions, and sanitizer findings.
+2. The server validates the language (Java, Python, C, or C++; it never defaults to Java) and builds a prompt from that language's profile: the real toolchain (Java 21, Python 3.12 with its installed packages, C17 with gcc 13, C++20 with g++ 13) and its rules. File contents and program output are passed to the model as data, never as instructions.
+3. Code comes back only in the target language. A reply in the wrong language is refused with an explanation.
+4. Every suggestion is **compiled (or syntax-checked) in the sandbox** before an Apply button appears. If it fails, you see the real compiler errors and can send them back to Nemotron, at most twice.
+5. Nothing changes until you review the diff and apply it. Undo restores your version.
+
+**Where it lives in the code:**
+
+| File | Role |
+|---|---|
+| `web/lib/server/nemotron.ts` | Server-only client: request validation, prompts, model fallback, and extracting the suggestion |
+| `web/lib/ai/languages.ts` | One profile per language: toolchain facts, rules, and accepted code-block tags |
+| `web/app/api/ai/code-assist/route.ts` | The API route the assistant calls |
+| `web/components/workspace/nemotron-assistant.tsx` | The assistant panel: actions, diff review, sandbox check, apply and undo |
+
+The API key stays on the server: it is never sent to the browser, written to logs, or passed into sandboxes.
+
+### Running Nemotron on Nebius Token Factory
+
+[Nebius Token Factory](https://tokenfactory.nebius.com) serves NVIDIA Nemotron models through an OpenAI-compatible API, the same kind of API CodeVIZ already uses. Its Nemotron 3 Super model ID, `nvidia/nemotron-3-super-120b-a12b`, is the app's first choice. Switching takes configuration only, with no code change. Put this in `web/.env.local`:
+
+```bash
+NVIDIA_API_BASE_URL=https://api.tokenfactory.nebius.com/v1
+NVIDIA_NEMOTRON_API_KEY=<your Nebius Token Factory API key>
+NVIDIA_NEMOTRON_MODEL=nvidia/nemotron-3-super-120b-a12b
+```
+
+Create an API key in the Token Factory console under **API keys**. Restart `npm run dev` after editing `.env.local`. To use NVIDIA's own endpoint instead, remove `NVIDIA_API_BASE_URL` and use a key from [build.nvidia.com](https://build.nvidia.com).
+
+### Where Token Factory accelerated our workflow
+
+**[Fill in before submitting.]** Describe how your team actually used Nebius Token Factory, for example: which Nemotron models you tried there, how it sped up iterating on prompts, latency or cost you observed, or features such as the playground or model catalog you relied on.
+
+### Other Nebius tools and services
+
+**[Fill in before submitting, or delete this section.]** List any other Nebius services you used (for example, Nebius AI Cloud compute) and what for.
 
 ---
 
@@ -287,3 +322,9 @@ Rebuild it with `docker build -t codeviz-java-sandbox:21 -f runner/sandbox.Docke
     ├── public/examples/       # the example library
     └── tests/                 # visualizer checks against real recordings
 ```
+
+---
+
+## License
+
+CodeVIZ is released under the [MIT License](LICENSE).

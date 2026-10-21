@@ -133,6 +133,24 @@ public final class Server {
         Job job = jobs.get(parts[0]);
         if (job == null) { error(ex, 404, "not_found", "That execution does not exist or has expired."); return; }
         if (parts.length == 1 && method.equals("GET")) { send(ex, 200, view(job)); return; }
+        if (parts.length == 2 && parts[1].equals("input") && method.equals("POST")) {
+          /* Typed input for an interactive run: {"text": "...", "eof": false}. */
+          Map<?, ?> body;
+          try {
+            String text = readBody(ex.getRequestBody());
+            if (!(Json.parse(text) instanceof Map<?, ?> m)) throw new IllegalArgumentException("Body must be a JSON object");
+            body = m;
+          } catch (IllegalArgumentException e) {
+            error(ex, 400, "bad_request", e.getMessage());
+            return;
+          }
+          String text = body.get("text") instanceof String t ? t : "";
+          if (text.length() > 16_384) { error(ex, 413, "too_large", "Send at most 16 KB of input at a time."); return; }
+          if (!job.interactive) { error(ex, 409, "not_interactive", "This run was not started interactively."); return; }
+          if (!job.sendInput(text, Boolean.TRUE.equals(body.get("eof")))) { error(ex, 409, "not_waiting", "The program is no longer reading input."); return; }
+          send(ex, 202, view(job));
+          return;
+        }
         if (parts.length == 2 && parts[1].equals("cancel") && method.equals("POST")) {
           job.cancel();
           if (job.status.equals("queued")) {
@@ -265,6 +283,8 @@ public final class Server {
       return;
     }
     Job job = new Job(mode);
+    /* A run can be interactive: its input stays open for typing (POST .../input). Only runs: a recording needs its input up front. */
+    job.interactive = mode.equals("run") && Boolean.TRUE.equals(body.get("interactive"));
     try {
       pool.execute(() -> {
         if (job.cancelRequested()) return;
@@ -287,6 +307,14 @@ public final class Server {
     m.put("startedAt", job.startedAt == 0 ? null : job.startedAt);
     m.put("finishedAt", job.finishedAt == 0 ? null : job.finishedAt);
     if (job.finished() && job.result != null) m.put("result", job.result);
+    /* An interactive run's output so far, and whether it still reads input. */
+    else if (job.interactive && job.liveOut != null) {
+      Map<String, Object> live = new LinkedHashMap<>();
+      live.put("stdout", job.liveOut.snapshot());
+      live.put("stderr", job.liveErr == null ? "" : job.liveErr.snapshot());
+      live.put("acceptsInput", job.acceptsInput());
+      m.put("live", live);
+    }
     return m;
   }
 

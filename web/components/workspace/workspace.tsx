@@ -36,7 +36,7 @@ import {
   isDirty, markSaved, newClassSource, openFile, packageOf, planAdd, renameFile, renameFolder, serialize, setContent, showInCurrentTab, validateFolder,
   validatePath, type Project,
 } from "@/lib/workspace/project";
-import {
+import { sendInput,
   RunnerError, cancelExecution, getRuntime, startExecution, waitForExecution, type Diagnostic, type ExecResult, type Runtime,
 } from "@/lib/workspace/runner-client";
 
@@ -103,7 +103,9 @@ export function Workspace({ monoFont }: { monoFont: string }) {
   }, []);
   const [terminalHeight, setTerminalHeight] = useState(220);
   const [rightWidth, setRightWidth] = useState(0.42);
-  const [tab, setTab] = useState<"output" | "problems" | "input">("output");
+  const [tab, setTab] = useState<"output" | "problems">("output");
+  /* The interactive run in the terminal: output so far, whether it reads input, and what was typed. */
+  const [live, setLive] = useState<{ id: string; stdout: string; stderr: string; acceptsInput: boolean; echoes: { at: number; text: string }[] } | null>(null);
   const [importing, setImporting] = useState(false);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [resetKey, setResetKey] = useState(0);
@@ -112,7 +114,6 @@ export function Workspace({ monoFont }: { monoFont: string }) {
   const examplesRef = useRef<HTMLElement>(null);
   const [rightTab, setRightTab] = useState<"visualize" | "io" | "classes" | "dp" | "memory">("visualize");
   /* Expected Output & Given Inputs: kept here so the code writer can use the same run. */
-  const [ioInput, setIoInput] = useState("");
   const [ioExpected, setIoExpected] = useState("");
   const [ioContext, setIoContext] = useState("");
   const [ioRun, setIoRun] = useState<IoRun | null>(null);
@@ -196,8 +197,8 @@ export function Workspace({ monoFont }: { monoFont: string }) {
     if (!hydrated) return;
     const stored = deserialize(readStorage(STORAGE_KEY));
     if (!stored) return;
-    store(serialize({ ...stored, mainClass: project.mainClass, stdin: project.stdin, fontSize: project.fontSize }));
-  }, [project.mainClass, project.stdin, project.fontSize, hydrated, store]);
+    store(serialize({ ...stored, mainClass: project.mainClass, stdin: project.stdin, inputs: project.inputs, fontSize: project.fontSize }));
+  }, [project.mainClass, project.stdin, project.inputs, project.fontSize, hydrated, store]);
 
   /*
    * Examples join the workspace: each goes into its own folder and package, next to everything
@@ -220,7 +221,7 @@ export function Workspace({ monoFont }: { monoFont: string }) {
         return;
       }
       setProject(persist(result.project));
-      setMessage(note + (result.keptInput ? ` Your Input tab was kept; this example's sample input is ${JSON.stringify(ex.stdin)}.` : ""));
+      setMessage(note);
     };
     try {
       let built = await exampleFiles(ex);
@@ -306,6 +307,13 @@ export function Workspace({ monoFont }: { monoFont: string }) {
 
   /* ---------------- Execution ---------------- */
 
+  /* Each file's own given input. A Java target is a class name: its file holds the input. */
+  const inputOf = (target: string | null): string => {
+    const path = !target ? active?.path ?? null
+      : /\.(py|c|cpp|cc|cxx)$/.test(target) ? target
+        : project.files.find((f) => f.path.endsWith(".java") && classFor(f.path, f.content) === target)?.path ?? null;
+    return path ? project.inputs[path] ?? "" : "";
+  };
   const execute = useCallback(
     async (mode: "compile" | "run" | "trace", override?: { stdin?: string; mainClass?: string | null }): Promise<ExecResult | null> => {
       if (job.current) return null;
@@ -321,10 +329,15 @@ export function Workspace({ monoFont }: { monoFont: string }) {
         : null;
       const abort = new AbortController();
       job.current = { id: null, abort };
+      /* Run (from the Run button) is interactive: the program reads what you type into the terminal. */
+      const interactive = effective === "run" && !override;
+      setLive(null);
       setPhase("preparing");
       setMessage(null);
       setResult(null);
       if (effective === "trace") {
+        /* Started from the Given input tab: show the recording (that tab has no playback). */
+        setRightTab((t) => (t === "io" ? "visualize" : t));
         /* A new recording starts from the file the user is on. */
         following.current = true;
         autoOpened.current = active?.path ?? null;
@@ -339,11 +352,22 @@ export function Workspace({ monoFont }: { monoFont: string }) {
           files,
           mainClass: target,
           language,
-          stdin: override?.stdin ?? project.stdin,
+          /* A recording needs its input up front: the given input saved for the file being run, and no other file's. */
+          stdin: interactive ? "" : override?.stdin ?? inputOf(target),
+          interactive: interactive || undefined,
         });
         job.current.id = started.id;
         setPhase(started.status);
-        const done = await waitForExecution(started.id, (s) => setPhase(s), abort.signal);
+        if (interactive) {
+          setTab("output");
+          setLive({ id: started.id, stdout: "", stderr: "", acceptsInput: true, echoes: [] });
+        }
+        const done = await waitForExecution(started.id, (s, ex) => {
+          setPhase(s);
+          const lv = ex.live;
+          if (interactive && lv) setLive((l) => (l && l.id === started.id ? { ...l, stdout: lv.stdout, stderr: lv.stderr, acceptsInput: lv.acceptsInput } : l));
+        }, abort.signal);
+        if (interactive) setLive((l) => (l && l.id === started.id ? { ...l, acceptsInput: false } : l));
         const r = done.result!;
         setResult(r);
         setPhase(r.status);
@@ -394,6 +418,9 @@ export function Workspace({ monoFont }: { monoFont: string }) {
       : active.path.endsWith(".java") ? `${ioName} has no main method, so it can't run on its own. Open a file with public static void main(String[] args).`
         : /\.(h|hpp|hh|hxx)$/.test(active.path) ? `${ioName} is a header, so it can't run on its own. Open the .c or .cpp file with main().`
           : `${ioName} is not a program. Open a Java, Python, C, or C++ file to run it.`;
+  /* The Given input field edits the open program's own saved input. */
+  const ioInput = ioPath ? project.inputs[ioPath] ?? "" : "";
+  const setIoInput = (v: string) => { if (ioPath) setProject((p) => ({ ...p, inputs: { ...p.inputs, [ioPath]: v } })); };
   const ioLanguage = ioPath.endsWith(".py") ? "Python" : /\.c$/.test(ioPath) ? "C" : /\.(cpp|cc|cxx)$/.test(ioPath) ? "C++" : ioPath.endsWith(".java") ? "Java" : null;
   const ioSource = project.files.find((f) => f.path === ioPath)?.content ?? "";
   const runIo = async () => {
@@ -462,7 +489,7 @@ export function Workspace({ monoFont }: { monoFont: string }) {
       runtime: evidence.length ? evidence.join("\n") : undefined,
       file: f ? { path: f.path, content: f.content } : undefined,
       selection: !usesIo && selection.current.trim() ? selection.current : undefined,
-      input: usesIo ? ioRun?.input ?? (ioInput || undefined) : project.stdin || undefined,
+      input: usesIo ? ioRun?.input ?? (ioInput || undefined) : (active ? project.inputs[active.path] : undefined) || undefined,
       expectedOutput: ioExpected.trim() ? ioExpected : undefined,
       context: ioContext.trim() ? ioContext : undefined,
       execution: r && r.status !== "queued"
@@ -589,7 +616,10 @@ export function Workspace({ monoFont }: { monoFont: string }) {
   );
   const execLine = current && current.file === project.active ? current.line : null;
   /* Output follows playback only for the visualized run itself; a Run or Compile shows all of its output. */
-  const stdout = interp && current && result?.mode === "trace" && result.stdout !== undefined ? result.stdout.slice(0, current.out) : (result?.stdout ?? "");
+  /* At the last step of a recording that ran to the end, the program has finished: show all of its output.
+     (A Python recording's last step comes just before its last line runs, so that line's output is after it.) */
+  const showAllOutput = atEnd && !!interp && !(result?.trace as { truncated?: boolean } | undefined)?.truncated;
+  const stdout = interp && current && result?.mode === "trace" && result.stdout !== undefined ? (showAllOutput ? result.stdout : result.stdout.slice(0, current.out)) : (result?.stdout ?? "");
 
   /* ---------------- File actions ---------------- */
 
@@ -779,10 +809,11 @@ export function Workspace({ monoFont }: { monoFont: string }) {
         @keyframes cv-progress { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
       `}</style>
 
-      <header className="cv-glass-header relative flex h-13 shrink-0 items-center gap-2 border-b border-white/10 px-3">
-        <Link href="/" className="flex items-center gap-1.5 rounded-full py-1.5 pl-2 pr-3 text-[15px] font-bold tracking-tight transition hover:bg-white/10">
+      {/* On a phone the header scrolls sideways inside itself if it must, so it can never widen the page. */}
+      <header className="cv-glass-header relative flex h-13 shrink-0 items-center gap-2 overflow-x-auto overflow-y-hidden whitespace-nowrap border-b border-white/10 px-3 [scrollbar-width:none] [&>*]:shrink-0">
+        <Link href="/" aria-label="codeviz home" className="flex items-center gap-1.5 rounded-full py-1.5 pl-2 pr-3 text-[15px] font-bold tracking-tight transition hover:bg-white/10">
           <BackIcon className="text-zinc-500" />
-          codeviz
+          <span className="hidden sm:inline">codeviz</span>
         </Link>
         <button onClick={toggleFiles} className={`${btn} text-zinc-400 hover:bg-white/10 hover:text-zinc-100`} aria-pressed={explorer} aria-expanded={mobileFiles || undefined}>
           Files
@@ -790,7 +821,8 @@ export function Workspace({ monoFont }: { monoFont: string }) {
         <button onClick={() => setImporting(true)} className={`${btn} text-zinc-400 hover:bg-white/10 hover:text-zinc-100`}>
           Import
         </button>
-        <button onClick={openIo} className={`${btn} hidden text-zinc-400 hover:bg-white/10 hover:text-zinc-100 xl:inline-flex`}>Expected Output &amp; Given Inputs</button>
+        {/* No inline-flex from btn here: two display utilities on one element depend on stylesheet order. */}
+        <button onClick={openIo} className={`${btn.replace("inline-flex ", "")} hidden text-zinc-400 hover:bg-white/10 hover:text-zinc-100 xl:inline-flex`}>Expected Output &amp; Given Inputs</button>
         <span className="mx-1 hidden h-5 w-px bg-white/10 md:block" aria-hidden="true" />
         <span className="hidden max-w-56 truncate text-[13px] text-zinc-300 lg:inline">My project</span>
         <span className="mx-1 hidden h-5 w-px bg-white/10 md:block" aria-hidden="true" />
@@ -929,8 +961,14 @@ export function Workspace({ monoFont }: { monoFont: string }) {
               message={message}
               stdout={stdout}
               diagnostics={diagnostics}
-              stdin={project.stdin}
-              setStdin={(v) => setProject((p) => ({ ...p, stdin: v }))}
+              live={live}
+              onSend={(text, eof) => {
+                const l = live;
+                if (!l || !l.acceptsInput) return;
+                /* Shown where the program was when it was typed, like a terminal echo. */
+                if (text) setLive((x) => (x && x.id === l.id ? { ...x, echoes: [...x.echoes, { at: x.stdout.length, text }] } : x));
+                sendInput(l.id, text, eof).catch(() => setMessage("The program is no longer reading input."));
+              }}
               onJump={jump}
               onClear={() => {
                 setResult(null);
@@ -985,10 +1023,10 @@ export function Workspace({ monoFont }: { monoFont: string }) {
                       stepIndex={step}
                       onSeek={(s) => { setPlaying(false); setStep(s); }}
                       onJump={jumpTo}
-                      rows={Math.max(1, Math.min(12, parseInt(project.stdin, 10) || dpModel?.rows || 6))}
+                      rows={Math.max(1, Math.min(12, parseInt((active && project.inputs[active.path]) || "", 10) || dpModel?.rows || 6))}
                       onRows={(n) => {
                         const input = `${n}\n`;
-                        setProject((p) => ({ ...p, stdin: input }));
+                        if (active) setProject((p) => ({ ...p, inputs: { ...p.inputs, [active.path]: input } }));
                         void execute("trace", { stdin: input });
                       }}
                       approaches={dpApproaches}

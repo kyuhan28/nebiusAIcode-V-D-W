@@ -32,7 +32,13 @@ export type ExecResult = {
   /** javac's class model, after a clean compile (see lib/trace/inheritance.ts). */
   hierarchy?: unknown[];
 };
-export type Execution = { id: string; status: ExecStatus; result?: ExecResult };
+export type Execution = {
+  id: string;
+  status: ExecStatus;
+  result?: ExecResult;
+  /** An interactive run while it runs: its output so far, and whether it still reads input. */
+  live?: { stdout: string; stderr: string; acceptsInput: boolean };
+};
 /** One finding from AddressSanitizer, LeakSanitizer, or UndefinedBehaviorSanitizer, as the runner parsed it. */
 export type MemoryIssue = {
   tool: string;
@@ -77,22 +83,27 @@ async function json<T>(res: Response): Promise<T> {
 
 export const getRuntime = () => fetch("/api/java/runtime", { cache: "no-store" }).then((r) => json<Runtime>(r));
 
-export const startExecution = (body: { mode: "compile" | "run" | "trace"; files: { path: string; content: string }[]; mainClass?: string | null; stdin?: string; language?: "java" | "python" | "c" | "cpp" }) =>
+export const startExecution = (body: { mode: "compile" | "run" | "trace"; files: { path: string; content: string }[]; mainClass?: string | null; stdin?: string; language?: "java" | "python" | "c" | "cpp"; interactive?: boolean }) =>
   fetch("/api/java/executions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then((r) => json<Execution>(r));
+
+/** Sends a line typed into the terminal to an interactive run; eof ends its input (Ctrl+D). */
+export const sendInput = (id: string, text: string, eof = false) =>
+  fetch(`/api/java/executions/${id}/input`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text, eof }) }).then((r) => json<Execution>(r));
 
 export const cancelExecution = (id: string) =>
   fetch(`/api/java/executions/${id}/cancel`, { method: "POST" }).then((r) => json<Execution>(r));
 
 /** Polls until the execution finishes, reporting stage changes along the way. */
-export async function waitForExecution(id: string, onStatus: (s: ExecStatus) => void, signal: AbortSignal): Promise<Execution> {
+export async function waitForExecution(id: string, onStatus: (s: ExecStatus, ex: Execution) => void, signal: AbortSignal): Promise<Execution> {
   let delay = 150;
   for (;;) {
     if (signal.aborted) throw new RunnerError("Stopped", "aborted");
     const ex = await fetch(`/api/java/executions/${id}`, { cache: "no-store", signal }).then((r) => json<Execution>(r));
-    onStatus(ex.status);
+    onStatus(ex.status, ex);
     if (ex.result) return ex;
     await new Promise((r) => setTimeout(r, delay));
-    delay = Math.min(delay * 1.4, 700);
+    /* An interactive run is polled briskly, so typed answers and new prompts show up promptly. */
+    delay = ex.live ? 200 : Math.min(delay * 1.4, 700);
   }
 }
 

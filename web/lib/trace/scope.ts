@@ -175,6 +175,11 @@ export function summarize(v: Val, heap: Record<string, HeapObj>, depth = 0): str
   }
   const items = itemsOf(o) ?? [];
   const len = o.t === "array" ? o.len : items.length;
+  /* C: a char array holding NUL-terminated text is a string; show the text (its cells stay expandable). */
+  if (STYLE === "c" && o.t === "array" && /^(const )?(unsigned |signed )?char$/.test(o.of)) {
+    const nul = items.findIndex((x) => x.t === "char" && (x as { code?: number }).code === 0);
+    if (nul >= 0 && items.slice(0, nul).every((x) => x.t === "char" && typeof x.v === "string" && x.v.length === 1)) return JSON.stringify(items.slice(0, nul).map((x) => x.v).join(""));
+  }
   if (depth > 1) return o.t === "array" ? `${formatType(o.of)}[${len}]` : `[${len} items]`;
   const tuple = STYLE === "python" && o.t === "list" && o.cls === "tuple";
   const [open, close] = o.t === "set" ? ["{", "}"] : tuple ? ["(", ")"] : ["[", "]"];

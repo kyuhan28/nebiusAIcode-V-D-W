@@ -3,7 +3,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { CSS2DObject, CSS2DRenderer } from "three/examples/jsm/renderers/CSS2DRenderer.js";
 import { addEnvironment, createComposer, createRenderer, disposeObject, prefersReducedMotion } from "./core";
 import { createIdentifierLabel } from "./identifier-label";
-import { createInfiniteGrid } from "./journey/grid";
+import { createInfiniteGrid, floorBelow } from "./journey/grid";
 import { identifier } from "../trace/types";
 import { JOURNEY, NodeVisual, boxKit, type NodeState } from "./journey/visuals";
 import type { ArrayView } from "../trace/interpret";
@@ -35,9 +35,6 @@ export function createTraceArrayScene(container: HTMLElement, length: number, fo
   scene.fog = new THREE.Fog(0x000000, 20, 70);
   const envMap = addEnvironment(renderer, scene);
   scene.environmentIntensity = 0.6;
-  /* The same white grid floor as the landing page, under the structures. */
-  const grid = createInfiniteGrid(-1.8);
-  scene.add(grid.mesh);
   const still = prefersReducedMotion();
 
   /* Long arrays and lists wrap into rows of 10, keeping index order, so every value stays readable. */
@@ -46,6 +43,10 @@ export function createTraceArrayScene(container: HTMLElement, length: number, fo
   const ROW_H = 2.7;
   const slotX = (i: number) => ((i % PER_ROW) - (PER_ROW - 1) / 2) * (CELL + GAP);
   const slotY = (i: number) => ((ROWS - 1) / 2 - Math.floor(i / PER_ROW)) * ROW_H;
+  /* The same white grid floor as the landing page, under the structures: 1.8 below the lowest row, as it
+     sits under a one-row array, so a long array that wraps into many rows never sinks through it. */
+  const grid = createInfiniteGrid(floorBelow(slotY(Math.max(length - 1, 0)), -1.8, 1.8));
+  scene.add(grid.mesh);
   const kit = boxKit(CELL, CELL, CELL, 0.14);
   /* The variable's floating label, above the index markers' lane so a marker never hides it. */
   const LABEL_Y = POINTER_Y + 0.95;
