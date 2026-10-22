@@ -308,12 +308,11 @@ export function Workspace({ monoFont }: { monoFont: string }) {
   /* ---------------- Execution ---------------- */
 
   /* Each file's own given input. A Java target is a class name: its file holds the input. */
-  const inputOf = (target: string | null): string => {
-    const path = !target ? active?.path ?? null
-      : /\.(py|c|cpp|cc|cxx)$/.test(target) ? target
-        : project.files.find((f) => f.path.endsWith(".java") && classFor(f.path, f.content) === target)?.path ?? null;
-    return path ? project.inputs[path] ?? "" : "";
-  };
+  const pathOf = (target: string | null): string | null => !target ? active?.path ?? null
+    : /\.(py|c|cpp|cc|cxx)$/.test(target) ? target
+      : project.files.find((f) => f.path.endsWith(".java") && classFor(f.path, f.content) === target)?.path ?? null;
+  /* What was typed into each file's last interactive Run: Visualize can reuse it when the file has no Given input. */
+  const typed = useRef<Record<string, string>>({});
   const execute = useCallback(
     async (mode: "compile" | "run" | "trace", override?: { stdin?: string; mainClass?: string | null }): Promise<ExecResult | null> => {
       if (job.current) return null;
@@ -347,13 +346,20 @@ export function Workspace({ monoFont }: { monoFont: string }) {
       }
       try {
         const files = project.files.map((f) => ({ path: f.path, content: f.content }));
+        /* Visualize needs its input up front: this file's Given input; if it has none, what was typed in its last Run
+           (saved as its Given input, so it can be seen and edited). */
+        const runFile = pathOf(target);
+        const saved = runFile ? project.inputs[runFile] ?? "" : "";
+        const reuse = effective === "trace" && !override && !saved && runFile ? typed.current[runFile] ?? null : null;
+        if (reuse && runFile) setProject((p) => ({ ...p, inputs: { ...p.inputs, [runFile]: reuse } }));
+        const given = override?.stdin ?? reuse ?? saved;
         const started = await startExecution({
           mode: effective,
           files,
           mainClass: target,
           language,
           /* A recording needs its input up front: the given input saved for the file being run, and no other file's. */
-          stdin: interactive ? "" : override?.stdin ?? inputOf(target),
+          stdin: interactive ? "" : given,
           interactive: interactive || undefined,
         });
         job.current.id = started.id;
@@ -367,12 +373,20 @@ export function Workspace({ monoFont }: { monoFont: string }) {
           const lv = ex.live;
           if (interactive && lv) setLive((l) => (l && l.id === started.id ? { ...l, stdout: lv.stdout, stderr: lv.stderr, acceptsInput: lv.acceptsInput } : l));
         }, abort.signal);
-        if (interactive) setLive((l) => (l && l.id === started.id ? { ...l, acceptsInput: false } : l));
+        if (interactive) setLive((l) => {
+          if (l && l.id === started.id && runFile && l.echoes.length) typed.current[runFile] = l.echoes.map((e) => e.text).join("");
+          return l && l.id === started.id ? { ...l, acceptsInput: false } : l;
+        });
         const r = done.result!;
         setResult(r);
         setPhase(r.status);
         if (r.error) setMessage(r.errorCode === "choose_main" ? "More than one class has a main method. Pick the entry point in the toolbar." : r.error);
         else if (noMain && r.status === "completed") setMessage(noMain);
+        if (r.trace && reuse) setMessage("Used the input you typed in this file's last Run. It is now this file's Given input (Expected Output & Given Inputs tab), so you can change it.");
+        /* A recording that ran out of input has nothing to draw: say why, and where the input goes. */
+        if (r.trace && !given && /NoSuchElementException|InputMismatchException|EOFError/.test(r.exception?.type ?? "")) {
+          setMessage(`This program reads input, but this file has no Given input, so it stopped${r.exception?.line ? ` at line ${r.exception.line}` : ""} before it built anything to draw. Add the input under Given input in the Expected Output & Given Inputs tab (or Run the file and type it), then press Visualize again.`);
+        }
         setTab(r.status === "compile_failed" ? "problems" : "output");
         if (r.trace) {
           const sources = Object.fromEntries(files.map((f) => [f.path, f.content]));
@@ -747,7 +761,7 @@ export function Workspace({ monoFont }: { monoFont: string }) {
   const sandbox = runtime?.sandbox.level;
   const showRight = layout !== "code";
   /* Variables live in the scene: docked over a drawn structure, or the whole view when there is none. */
-  const sceneDrawn = !!interp && (interp.layers.length >= 2 || !!interp.structure || !!interp.array);
+  const sceneDrawn = !!interp && (interp.layers.length >= 1 || !!interp.structure || !!interp.array);
   const scopeMode: "docked" | "stage" | null = !interp ? null : sceneDrawn ? "docked" : inputReplay ? null : "stage";
   const rightPct = layout === "visualize" ? 0.66 : rightWidth;
 
@@ -1088,7 +1102,7 @@ export function Workspace({ monoFont }: { monoFont: string }) {
               <div className="relative min-h-0 flex-1 overflow-hidden">
                 <div className="cv-scene-scrim" aria-hidden="true" />
                 <PanelBoundary key={interp ? "run" : "idle"} name="visualizer">
-                {interp && interp.layers.length >= 2 ? (
+                {interp && (interp.layers.length >= 2 || (interp.layers.length === 1 && !interp.structure && !interp.array)) ? (
                   <StructureVisualizer views={current?.layers ?? []} resetKey={resetKey} fontFamily={monoFont} className="absolute inset-0" />
                 ) : interp?.structure ? (
                   <StructureVisualizer view={current?.structure ?? null} title={interp.title} resetKey={resetKey} fontFamily={monoFont} className="absolute inset-0" />

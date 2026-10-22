@@ -10,9 +10,9 @@ Everything you see comes from an actual run of your code. Nothing is simulated f
 
 ## Contents
 
-- [Quick start](#quick-start)
 - [Features](#features)
 - [How it works](#how-it-works)
+- [Quick start](#quick-start)
 - [Configuration](#configuration)
 - [NVIDIA Nemotron and Nebius Token Factory](#nvidia-nemotron-and-nebius-token-factory)
 - [Security](#security)
@@ -21,6 +21,48 @@ Everything you see comes from an actual run of your code. Nothing is simulated f
 - [Limitations](#limitations)
 - [Project layout](#project-layout)
 - [License](#license)
+
+---
+
+## Features
+
+### Languages
+
+| | Runs on | Visualize (step-by-step) | Highlights |
+|---|---|---|---|
+| **Java** | JDK 21+ (`javac` + JVM) | Recorded through the JVM's debugger interface | Arrays and collections, linked structures, trees and graphs, inheritance and virtual dispatch, dynamic programming tables |
+| **Python** | CPython 3.12 with numpy, pandas, matplotlib, scipy, scikit-learn, sympy, networkx, pillow | Recorded with `sys.settrace` | Lists, tuples, dicts, sets, matrices, NumPy arrays; values shown in Python notation |
+| **C** | gcc 13, C17 | Recorded by a small `ptrace` debugger that reads the program's own DWARF debug info | **Memory tab**: stack frames, heap blocks, pointer arrows, `malloc`/`calloc`/`realloc`/`free` lifecycle, dangling pointers, leaks |
+| **C++** | g++ 13, C++20 | Same recorder as C | Everything in C, plus object lifetime (constructors, copy and move, destructors), `unique_ptr`/`shared_ptr`/`weak_ptr` with real owner counts, `std::vector` size and capacity, `std::string` |
+
+### In the workspace
+
+- **Editor and file explorer** with multi-file projects, folders, right-click menus, and ZIP import.
+- **Run and Visualize.** Run prints the output. Visualize records the run so you can step through it with playback controls (play, pause, step, seek, reset).
+- **Views:** a 3D scene for arrays and data structures, a call-stack and variables panel, plus **Memory** (C/C++), **Inheritance**, and **Dynamic programming** tabs.
+- **Memory checks on every C/C++ run.** AddressSanitizer, UndefinedBehaviorSanitizer, and LeakSanitizer report use-after-free, buffer overflows, double frees, leaks, and undefined behavior on the exact line, with a plain-language explanation in Problems.
+- **Expected Output & Given Inputs.** Run the open file with an input, compare against an expected output, and ask Nemotron to explain any difference.
+- **Example library** with ready-made programs in every language. Adding an example never touches your own files.
+
+---
+
+## How it works
+
+```
+┌──────────────┐   HTTP    ┌──────────────┐  one locked-down container per job  ┌──────────────┐
+│  web (Next)  │ ────────▶ │    runner    │ ──────────────────────────────────▶ │   sandbox    │
+│  editor, 3D  │ ◀──────── │  (Java HTTP  │ ◀────────────────────────────────── │ compile, run,│
+│  views, AI   │  results  │   service)   │      output and recordings          │    record    │
+└──────────────┘           └──────────────┘                                     └──────────────┘
+       │
+       └── NVIDIA Nemotron (server-side only; the API key never reaches the browser)
+```
+
+- **`web/`** is a Next.js 16 + React 19 + three.js app: the editor, the visualizations, and the server routes that talk to the runner and to NVIDIA.
+- **`runner/`** is a small Java HTTP service. It receives your files, then compiles, runs, or records them inside a sandbox, and returns the output plus a step-by-step recording (the trace).
+- **The sandbox** is a Docker image (`runner/sandbox.Dockerfile`) with a JDK, Python 3.12 with its packages, and gcc/g++. Every job gets a fresh container with no network, a read-only filesystem, no capabilities, and limits on memory, CPU, processes, and file size.
+
+The recorders live in `runner/` too. `bin/pyrun.py` records Python, `bin/ctrace.py` records C and C++, and the Java recorder is built into the runner. The trace format is documented in [`runner/README.md`](runner/README.md).
 
 ---
 
@@ -79,48 +121,6 @@ docker compose up -d runner
 ```
 
 The web app still runs separately with `npm run dev`.
-
----
-
-## Features
-
-### Languages
-
-| | Runs on | Visualize (step-by-step) | Highlights |
-|---|---|---|---|
-| **Java** | JDK 21+ (`javac` + JVM) | Recorded through the JVM's debugger interface | Arrays and collections, linked structures, trees and graphs, inheritance and virtual dispatch, dynamic programming tables |
-| **Python** | CPython 3.12 with numpy, pandas, matplotlib, scipy, scikit-learn, sympy, networkx, pillow | Recorded with `sys.settrace` | Lists, tuples, dicts, sets, matrices, NumPy arrays; values shown in Python notation |
-| **C** | gcc 13, C17 | Recorded by a small `ptrace` debugger that reads the program's own DWARF debug info | **Memory tab**: stack frames, heap blocks, pointer arrows, `malloc`/`calloc`/`realloc`/`free` lifecycle, dangling pointers, leaks |
-| **C++** | g++ 13, C++20 | Same recorder as C | Everything in C, plus object lifetime (constructors, copy and move, destructors), `unique_ptr`/`shared_ptr`/`weak_ptr` with real owner counts, `std::vector` size and capacity, `std::string` |
-
-### In the workspace
-
-- **Editor and file explorer** with multi-file projects, folders, right-click menus, and ZIP import.
-- **Run and Visualize.** Run prints the output. Visualize records the run so you can step through it with playback controls (play, pause, step, seek, reset).
-- **Views:** a 3D scene for arrays and data structures, a call-stack and variables panel, plus **Memory** (C/C++), **Inheritance**, and **Dynamic programming** tabs.
-- **Memory checks on every C/C++ run.** AddressSanitizer, UndefinedBehaviorSanitizer, and LeakSanitizer report use-after-free, buffer overflows, double frees, leaks, and undefined behavior on the exact line, with a plain-language explanation in Problems.
-- **Expected Output & Given Inputs.** Run the open file with an input, compare against an expected output, and ask Nemotron to explain any difference.
-- **Example library** with ready-made programs in every language. Adding an example never touches your own files.
-
----
-
-## How it works
-
-```
-┌──────────────┐   HTTP    ┌──────────────┐  one locked-down container per job  ┌──────────────┐
-│  web (Next)  │ ────────▶ │    runner    │ ──────────────────────────────────▶ │   sandbox    │
-│  editor, 3D  │ ◀──────── │  (Java HTTP  │ ◀────────────────────────────────── │ compile, run,│
-│  views, AI   │  results  │   service)   │      output and recordings          │    record    │
-└──────────────┘           └──────────────┘                                     └──────────────┘
-       │
-       └── NVIDIA Nemotron (server-side only; the API key never reaches the browser)
-```
-
-- **`web/`** is a Next.js 16 + React 19 + three.js app: the editor, the visualizations, and the server routes that talk to the runner and to NVIDIA.
-- **`runner/`** is a small Java HTTP service. It receives your files, then compiles, runs, or records them inside a sandbox, and returns the output plus a step-by-step recording (the trace).
-- **The sandbox** is a Docker image (`runner/sandbox.Dockerfile`) with a JDK, Python 3.12 with its packages, and gcc/g++. Every job gets a fresh container with no network, a read-only filesystem, no capabilities, and limits on memory, CPU, processes, and file size.
-
-The recorders live in `runner/` too. `bin/pyrun.py` records Python, `bin/ctrace.py` records C and C++, and the Java recorder is built into the runner. The trace format is documented in [`runner/README.md`](runner/README.md).
 
 ---
 

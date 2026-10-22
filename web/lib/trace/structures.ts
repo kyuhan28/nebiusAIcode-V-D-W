@@ -512,7 +512,30 @@ const fmt = (x: number) => (x >= 2147483647 ? "∞" : Number.isInteger(x) ? Stri
 /** A grid cell's label: numbers as fmt shows them, text (strings, chars, booleans, null) as it is. */
 const cellText = (x: Cell) => (typeof x === "number" ? fmt(x) : x);
 
-function gridDetector(name: string): Detector {
+/** Text as rows of characters: a String or str (one row), or an array or list of strings (one row each). */
+function charRows(heap: Record<string, HeapObj>, v: Val | undefined): { id: string; rows: Cell[][] } | null {
+  if (!v) return null;
+  const isText = (x: Val) => (x.t === "String" || x.t === "str") && typeof x.v === "string";
+  if (isText(v)) return { id: `text:${v.v}`, rows: [[...(v.v as string)]] };
+  if (v.t !== "ref") return null;
+  const o = heap[v.id as string];
+  if (!o || (o.t !== "array" && o.t !== "list") || !o.items.length || !o.items.every((x) => isText(x) || x.t === "null")) return null;
+  return { id: v.id as string, rows: o.items.map((x) => (isText(x) ? [...(x.v as string)] : [])) };
+}
+
+/**
+ * Whether the program reads characters out of `name`: s.charAt(i), words[j].charAt(i), s.toCharArray() in Java;
+ * s[i] on a Python string; words[r][c] on a Python list of strings. Strings only printed or compared whole are not.
+ */
+function readsCharacters(name: string, sources: Record<string, string>, mode: "java" | "pystr" | "pylist"): boolean {
+  const n = name.replace(/[$]/g, "\\$");
+  const java = new RegExp(`\\b${n}\\s*(?:\\[[^\\]]*\\])?\\s*\\.\\s*(?:charAt|toCharArray|codePointAt)\\s*\\(`);
+  const pystr = new RegExp(`\\b${n}\\s*\\[[^\\]]+\\]`);
+  const pylist = new RegExp(`\\b${n}\\s*\\[[^\\]]+\\]\\s*\\[`);
+  return Object.values(sources).some((t) => java.test(t) || (mode === "pystr" && pystr.test(t)) || (mode === "pylist" && pylist.test(t)));
+}
+
+function gridDetector(name: string, rowsOf: (heap: Record<string, HeapObj>, v: Val | undefined) => { id: string; rows: Cell[][] } | null = (heap, v) => rows2d(heap, v, true)): Detector {
   let prev: Cell[][] | null = null;
   let arrayId: string | null = null;
   let visited = new Set<string>();
@@ -521,7 +544,7 @@ function gridDetector(name: string): Detector {
     kind: "grid",
     view: ({ step, heap, line }) => {
       let found: { id: string; rows: Cell[][] } | null = null;
-      for (const [nm, v] of roots(step)) if (nm === name && (found = rows2d(heap, v, true))) break;
+      for (const [nm, v] of roots(step)) if (nm === name && (found = rowsOf(heap, v))) break;
       if (!found) return null;
       const m = found.rows;
       const lengths = m.map((r) => r.length);
@@ -531,6 +554,8 @@ function gridDetector(name: string): Detector {
       /* A different array object (e.g. a new matrix) starts a fresh visit history. */
       if (found.id !== arrayId) { arrayId = found.id; visited = new Set(); prev = null; }
       const ints: Record<string, number> = {};
+      /* Python's module globals (a top-level loop's i) can be indexes too; the frame's locals win. */
+      for (const [q, v] of Object.entries(step.statics ?? {})) if (q.startsWith("__main__.") && typeof v.v === "number" && /^(int|long|short|Integer)$/.test(v.t)) ints[q.slice(9)] = v.v as number;
       for (const [nm, v] of Object.entries(step.stack[0]?.locals ?? {})) if (typeof v.v === "number" && /^(int|long|short|Integer)$/.test(v.t)) ints[nm] = v.v as number;
       /* Cells this line touches: name[r][c] with indices evaluated from the program's real locals. */
       const cell = new RegExp(`\\b${name}\\s*\\[([^\\]]+)\\]\\s*\\[([^\\]]+)\\]`, "g");
@@ -542,6 +567,19 @@ function gridDetector(name: string): Detector {
         const after = (line ?? "").slice((hit.index ?? 0) + hit[0].length);
         if (/^\s*(=(?!=)|\+=|-=|\*=|\/=|%=|\+\+|--)/.test(after) && target === null) target = `${r},${c}`;
         else if (!reads.includes(`${r},${c}`)) reads.push(`${r},${c}`);
+      }
+      /* Text: words[r].charAt(c) and s.charAt(c) read one character (s is row 0); so does Python's s[c] on one string. */
+      const charAt = new RegExp(`\\b${name}\\s*(?:\\[([^\\]]+)\\])?\\s*\\.\\s*charAt\\(\\s*([^()]+?)\\s*\\)`, "g");
+      for (const hit of (line ?? "").matchAll(charAt)) {
+        const r = hit[1] === undefined ? 0 : evalIndex(hit[1], ints), c = evalIndex(hit[2], ints);
+        if (r === null || c === null || r < 0 || r >= m.length || c < 0 || c >= lengths[r]) continue;
+        if (!reads.includes(`${r},${c}`)) reads.push(`${r},${c}`);
+      }
+      if (m.length === 1 && found.id.startsWith("text:")) {
+        for (const hit of (line ?? "").matchAll(new RegExp(`\\b${name}\\s*\\[([^\\]\\[:]+)\\](?!\\s*\\[)`, "g"))) {
+          const c = evalIndex(hit[1], ints);
+          if (c !== null && c >= 0 && c < lengths[0] && !reads.includes(`0,${c}`)) reads.push(`0,${c}`);
+        }
       }
       /* Java lists: name.get(r).get(c) reads a cell, name.get(r).set(c, ...) writes one. */
       const listCell = new RegExp(`\\b${name}\\s*\\.\\s*get\\(\\s*([^()]+?)\\s*\\)\\s*\\.\\s*(get|set)\\(\\s*([^,()]+?)\\s*[,)]`, "g");
@@ -913,6 +951,8 @@ function arrayDetector(name: string, indexVars: Set<string> = new Set()): Detect
       if (!items) return null;
       const labels = items.map((v) => (v.t === "null" ? "null" : String(v.v)));
       const ints: Record<string, number> = {};
+      /* Python's module globals (a top-level loop's i) can be indexes too; the frame's locals win. */
+      for (const [q, v] of Object.entries(step.statics ?? {})) if (q.startsWith("__main__.") && typeof v.v === "number" && /^(int|long|short|Integer)$/.test(v.t)) ints[q.slice(9)] = v.v as number;
       for (const [nm, v] of Object.entries(step.stack[0]?.locals ?? {})) if (typeof v.v === "number" && /^(int|long|short|Integer)$/.test(v.t)) ints[nm] = v.v as number;
       const touched = new Set<number>();
       const access = new RegExp(`\\b${name}\\s*(?:\\[([^\\]]+)\\](?!\\s*\\[)|\\.\\s*(?:get|set|remove)\\s*\\(([^,)]+))`, "g");
@@ -975,7 +1015,16 @@ export function detectExtraLayers(steps: RawStep[], heaps: Record<string, HeapOb
   steps.forEach((s, k) => {
     const heap = heaps[k];
     const consider = (nm: string, v: Val, depth: number) => {
-      if (out.length >= room || skip.has(nm) || names.has(nm) || v.t !== "ref" || ids.has(v.id as string)) return;
+      if (out.length >= room || skip.has(nm) || names.has(nm)) return;
+      /* A string the program reads characters from is drawn as its characters. */
+      if (v.t !== "ref") {
+        if (charRows(heap, v) && readsCharacters(nm, sources, v.t === "str" ? "pystr" : "java")) {
+          names.add(nm);
+          out.push({ key: `v:${nm}`, name: nm, title: `${nm} : ${v.t === "str" ? "str" : "String"}`, detector: gridDetector(nm, charRows) });
+        }
+        return;
+      }
+      if (ids.has(v.id as string)) return;
       const h = heap[v.id as string];
       if (!h) return;
       let det: Detector | null = null;
@@ -989,6 +1038,7 @@ export function detectExtraLayers(steps: RawStep[], heaps: Record<string, HeapOb
       else if (h.t === "stack" || ((h.t === "deque" || h.t === "list") && /stack|^(stk|st|s)$/i.test(nm))) det = seqDetector("stack", { name: nm });
       else if ((h.t === "deque" || h.t === "list") && /queue|^(q|line|waiting)$/i.test(nm)) det = seqDetector("queue", { name: nm });
       else if (h.t === "list" && h.cls === "java.util.LinkedList") det = jdkListDetector(nm);
+      else if (charRows(heap, v) && readsCharacters(nm, sources, h.t === "list" && h.cls === "list" ? "pylist" : "java")) det = gridDetector(nm, charRows);
       else if (rows2d(heap, v) && !MATRIX_GRAPH.test(nm)) det = gridDetector(nm);
       else if (empty && nested && !MATRIX_GRAPH.test(nm)) det = gridDetector(nm);
       else if (empty) return;  /* decided at a later step, once it has contents */

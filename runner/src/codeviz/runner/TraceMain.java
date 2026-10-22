@@ -627,6 +627,35 @@ public final class TraceMain {
     return readField(o, name) instanceof PrimitiveValue p ? p.intValue() : 0;
   }
 
+  /**
+   * A StringBuilder or StringBuffer as its characters, read from its own fields (value, coder, count) rather
+   * than by calling toString() in the program: recording never runs code the program did not run.
+   * coder 0 is one byte per char (Latin-1); 1 is two bytes per char (UTF-16, in the platform's byte order).
+   */
+  private static void builder(Json.Writer w, ObjectReference o, String type) {
+    int count = intField(o, "count");
+    int coder = readField(o, "coder") instanceof PrimitiveValue p ? p.intValue() : 0;
+    StringBuilder text = new StringBuilder();
+    if (readField(o, "value") instanceof ArrayReference bytes && count > 0) {
+      int n = Math.min(count, MAX_ITEMS);
+      int width = coder == 0 ? 1 : 2;
+      List<Value> raw = bytes.getValues(0, Math.min(bytes.length(), n * width));
+      boolean big = java.nio.ByteOrder.nativeOrder() == java.nio.ByteOrder.BIG_ENDIAN;
+      for (int i = 0; i + width <= raw.size(); i += width) {
+        int b0 = ((PrimitiveValue) raw.get(i)).byteValue() & 0xFF;
+        if (width == 1) { text.append((char) b0); continue; }
+        int b1 = ((PrimitiveValue) raw.get(i + 1)).byteValue() & 0xFF;
+        text.append((char) (big ? (b0 << 8) | b1 : b0 | (b1 << 8)));
+      }
+    }
+    w.raw("{\"t\":\"list\",\"cls\":").str(type).raw(",\"len\":").raw(String.valueOf(count)).raw(",\"text\":").str(text.toString()).raw(",\"items\":[");
+    for (int i = 0; i < text.length(); i++) {
+      if (i > 0) w.raw(",");
+      w.raw("{\"t\":\"char\",\"v\":").str(String.valueOf(text.charAt(i))).raw("}");
+    }
+    w.raw("]}");
+  }
+
   /** Arrays, user objects, and the internals of common java.util collections. */
   private void object(Json.Writer w, ObjectReference o, ArrayDeque<ObjectReference> pending, Set<Long> queued) {
     String type = o.referenceType().name();
@@ -654,6 +683,10 @@ public final class TraceMain {
         value(w, o.getValue(f), pending, queued);
       }
       w.raw("}}");
+      return;
+    }
+    if (type.equals("java.lang.StringBuilder") || type.equals("java.lang.StringBuffer")) {
+      builder(w, o, type);
       return;
     }
     List<Value> items = new ArrayList<>();

@@ -175,6 +175,8 @@ export function summarize(v: Val, heap: Record<string, HeapObj>, depth = 0): str
   }
   const items = itemsOf(o) ?? [];
   const len = o.t === "array" ? o.len : items.length;
+  /* A StringBuilder or StringBuffer reads as its text, like a String. */
+  if (o.t === "list" && /\.String(Builder|Buffer)$/.test(o.cls)) return JSON.stringify((o as { text?: string }).text ?? items.map((x) => String(x.v ?? "")).join(""));
   /* C: a char array holding NUL-terminated text is a string; show the text (its cells stay expandable). */
   if (STYLE === "c" && o.t === "array" && /^(const )?(unsigned |signed )?char$/.test(o.of)) {
     const nul = items.findIndex((x) => x.t === "char" && (x as { code?: number }).code === 0);

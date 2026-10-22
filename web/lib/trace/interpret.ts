@@ -463,9 +463,12 @@ export function interpret(raw: RawTrace, sources: Record<string, string> = {}): 
   /* Trees and linked lists found by their node class are named after the variable holding them. */
   if (detector && !detector.name) primaryTitle = ownerLabel(trace, heaps, detector, primaryTitle);
   const multi = extra.length + (detector ? 1 : 0) >= 2;
+  const lone = !detector && extra.length === 1;
   for (const st of steps) {
     if (multi && detector) st.layers.unshift({ key: "primary", title: primaryTitle, view: st.structure });
-    if (!multi) st.layers = [];
+    /* With one structure the primary view shows it, but a lone extra layer (a String[], a string read with
+       charAt, a StringBuilder) is the only view there is: it stays. */
+    if (!multi && !lone) st.layers = [];
     /* Loops light up the element they're on, in whichever structure they iterate. */
     for (const v of [st.structure, ...st.layers.map((l) => l.view)]) applyLoops(v, st.loops);
     if (st.array && st.loops.length) {
@@ -483,7 +486,7 @@ export function interpret(raw: RawTrace, sources: Record<string, string> = {}): 
   steps.forEach((st, k) => {
     const drawn = new Map<string, string>();
     if (primaryId && st.array) drawn.set(primaryId, arrayLabel(st));
-    const views: { title: string; view: StructureView | null }[] = multi ? st.layers : [{ title: primaryTitle, view: st.structure }];
+    const views: { title: string; view: StructureView | null }[] = multi || lone ? st.layers : [{ title: primaryTitle, view: st.structure }];
     for (const { title, view } of views) {
       if (!view) continue;
       if (view.name) {

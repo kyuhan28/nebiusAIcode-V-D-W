@@ -24,10 +24,21 @@ public final class Job {
   volatile ChildProcess.Capture liveOut;
   volatile ChildProcess.Capture liveErr;
 
+  /* Input typed before the program started (while it compiled) is held here and delivered when it starts. */
+  private final java.io.ByteArrayOutputStream early = new java.io.ByteArrayOutputStream();
+  private boolean earlyEof;
+  private boolean started;
+
   synchronized void openInput(java.io.OutputStream os, ChildProcess.Capture out, ChildProcess.Capture err) {
     input = os;
     liveOut = out;
     liveErr = err;
+    started = true;
+    try {
+      if (early.size() > 0) { os.write(early.toByteArray()); os.flush(); }
+    } catch (java.io.IOException ignored) {}
+    early.reset();
+    if (earlyEof) closeInput();
   }
 
   synchronized void closeInput() {
@@ -40,7 +51,12 @@ public final class Job {
 
   /** Writes text to the running program's standard input; eof closes it (as Ctrl+D does in a terminal). */
   synchronized boolean sendInput(String text, boolean eof) {
-    if (input == null) return false;
+    if (input == null) {
+      if (started || !interactive || finished()) return false;  /* the program has ended */
+      if (text != null && early.size() + text.length() <= 65_536) early.writeBytes(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+      if (eof) earlyEof = true;
+      return true;
+    }
     try {
       if (text != null && !text.isEmpty()) {
         input.write(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
